@@ -447,3 +447,56 @@ Three forks that materially change the build. Recommendations given; user's call
 3. **Stay read-only?** Arcs are ordered sequences, which want to become real playlists. v1 is deliberately
    read-only, with writes delegated to `ytmusic-mcp`. *Recommendation: stay read-only* — return the ordered
    list and let the orchestrator write it via `ytmusic-mcp`. Preserves the clean separation and v3 portability.
+
+---
+
+## Build status (2026-08-19)
+
+**Shipped.** Phases 0-5 are implemented, tested and verified against the real account. Phase 6 (learning)
+is partially in: feedback is recorded and rejections are enforced, but nothing yet drifts the anchors.
+
+| Phase | State |
+| --- | --- |
+| 0 — Foundation | **Done.** Library cache (20.5s → 0.9s), SQLite store, `signals.py` extracted so v1 and v2 share candidate generation. |
+| 1 — Atlas + mood space | **Done.** `moodspace.py` (4 axes, 11 anchors), `atlas.py` + `scripts/build_atlas.py` (resumable, rate-limit aware). |
+| 2 — Language layer | **Built, not run.** `lyrics.py` caches lyrics incl. negative results; `judge.py` labels via Claude. Optional dependency — not installed on this machine, so unexercised against the live API. |
+| 3 — Personal map | **Done.** `label.py` — source priority, artist propagation, genre priors from the `C - *` playlists, library sync. |
+| 4 — Sensing | **Done.** `sense.py` + `read_my_mood()` + `scripts/snapshot_history.py`. |
+| 5 — Arcs | **Done.** `arc.py` — five arcs, slot assignment, per-artist caps. |
+| 6 — Learning | **Partial.** `record_feedback()` and rejection enforcement ship; anchor drift and implicit history-diffing do not. |
+
+### What the measurements actually said
+
+The coverage worry in this plan was correct, and the mitigation mattered more than expected:
+
+- **Atlas alone is thin.** At 34% of the crawl the atlas had placed 44,310 songs but accounted for only
+  205 of the library's labels.
+- **Artist propagation is doing the heavy lifting** — 551 of 756 labels, and it needs no API key at all.
+  It was added as a hedge against the LLM layer being unavailable; it turned out to be the main engine of
+  coverage.
+- **Library coverage reached 52.2% with the crawl only a third done** and no Claude labelling whatsoever —
+  ahead of the 30-60% range predicted here.
+
+Re-measure with `python scripts/label_library.py --report` once the crawl finishes.
+
+### Deviations from the plan above
+
+- **Flat modules, not a `commendation/` package.** The repo was already flat (`server.py` at the root);
+  mixing layouts mid-build would have been worse than either choice. Revisit alongside the v3 provider
+  work, which needs the same restructuring.
+- **The v1 library cache stayed a JSON file** rather than folding into `library_snapshot`. It works and is
+  tested; rewriting it purely for storage uniformity wasn't worth the churn.
+- **`claude-opus-5` is the default judge model, not Haiku.** Which model reads your library is a quality
+  decision that belongs to the user; `COMMENDATION_JUDGE_MODEL` exists for anyone who wants to trade
+  accuracy for cost.
+- **Genre is a ranking input, not a mood source.** Genre says nothing about mood on its own, so it filters
+  seeds and boosts known artists rather than pretending to place a song in the space.
+
+### Known gaps
+
+- **`recommend_for_mood` takes ~18s.** Six seeds × ~4 API calls each, run serially. Threading the seed
+  gathering is the obvious fix and is not done.
+- **The Claude labelling path has never run against the real API** — only against a fake client in tests.
+- **Anchor vectors are hand-authored first drafts.** They have not been tuned against real listening.
+- **No implicit feedback yet.** Diffing past recommendations against later history is the highest-value
+  remaining piece, because it costs the user nothing.

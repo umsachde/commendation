@@ -82,7 +82,7 @@ No ML needed for v1 — simple, explainable scoring:
 
 ## v2 — Mood-aware recommendation
 
-Fully designed in **`PLAN_V2.md`** — read that before starting any v2 work. Summary of what it changes
+Designed **and implemented** — see **`PLAN_V2.md`**, including its build status section. Summary of what it changes
 relative to the open questions below:
 
 - **BPM is demoted, not built.** Probing `get_song()` against the real account confirms YouTube Music

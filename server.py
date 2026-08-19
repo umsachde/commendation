@@ -39,6 +39,17 @@ RECENT_LIKES_LIMIT = 100
 mcp = MCPServer("commendation")
 
 _yt: YTMusic | None = None
+_store_conn = None
+
+
+def _store():
+    """Lazily open the v2 mood store, shared across tool calls."""
+    global _store_conn
+    if _store_conn is None:
+        import store
+
+        _store_conn = store.connect()
+    return _store_conn
 
 
 def _client() -> YTMusic:
@@ -83,179 +94,30 @@ def handle_errors(fn):
             raise RuntimeError(f"YouTube Music error: {e}") from e
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Network error reaching YouTube Music: {e}") from e
+        except ValueError as e:
+            # Our own argument validation (e.g. an unknown arc name). These are
+            # actionable messages already -- they just need to arrive as a
+            # clean tool error rather than a raw traceback.
+            raise RuntimeError(str(e)) from e
 
     return wrapper
 
 
-# --- candidate generation ---------------------------------------------------
-
-_SOURCE_RADIO = "radio"
-_SOURCE_RELATED = "related"
-_SOURCE_ARTIST = "artist"
-_RELATED_ARTISTS_TO_EXPAND = 2  # how many of the seed artist's related artists to also pull top songs from
-
-_SIGNAL_ERRORS = (YTMusicError, requests.exceptions.RequestException)
-
-
-def _norm_track(item: dict[str, Any]) -> dict[str, Any]:
-    """Normalize the differing track shapes returned by watch playlists,
-    related content, and artist song lists into one consistent record."""
-    artists = item.get("artists")
-    if artists:
-        names = [a.get("name") for a in artists if a.get("name")]
-    elif item.get("artist"):
-        names = [item["artist"]]
-    else:
-        names = []
-
-    album = item.get("album")
-    if isinstance(album, dict):
-        album_name = album.get("name")
-    elif isinstance(album, str):
-        album_name = album
-    else:
-        album_name = None
-
-    return {
-        "videoId": item.get("videoId"),
-        "title": item.get("title"),
-        "artists": names,
-        "album": album_name,
-    }
-
-
-def _gather_seed_candidates(
-    yt: YTMusic, seed_video_id: str, seed_artist_names: list[str] | None = None
-) -> dict[str, dict[str, Any]]:
-    """Pull radio + related + artist-expansion candidates for one seed song.
-
-    Returns videoId -> {normalized track fields..., "sources": set[str]}.
-    A signal that fails is skipped rather than aborting the whole seed.
-
-    If `seed_artist_names` is passed, the seed track's own artist name(s) are
-    appended to it as a side effect -- lets callers recover the seed's artist
-    without a second lookup, e.g. to filter candidates down to that artist.
-    """
-    found: dict[str, dict[str, Any]] = {}
-
-    def add(item: dict[str, Any], source: str) -> None:
-        vid = item.get("videoId")
-        if not vid or vid == seed_video_id:
-            return
-        if vid not in found:
-            found[vid] = {**_norm_track(item), "sources": set()}
-        found[vid]["sources"].add(source)
-
-    watch = None
-    try:
-        watch = yt.get_watch_playlist(videoId=seed_video_id, limit=25, radio=True)
-    except _SIGNAL_ERRORS:
-        pass
-
-    seed_artist_id = None
-    if watch:
-        for t in watch.get("tracks", []):
-            add(t, _SOURCE_RADIO)
-            if t.get("videoId") == seed_video_id and t.get("artists"):
-                seed_artist_id = t["artists"][0].get("id")
-                if seed_artist_names is not None:
-                    seed_artist_names.extend(a.get("name") for a in t["artists"] if a.get("name"))
-
-        related_browse_id = watch.get("related")
-        if related_browse_id:
-            try:
-                sections = yt.get_song_related(related_browse_id)
-            except _SIGNAL_ERRORS:
-                sections = []
-            for section in sections:
-                for item in section.get("contents") or []:
-                    if isinstance(item, dict) and item.get("videoId"):
-                        add(item, _SOURCE_RELATED)
-
-    if seed_artist_id:
-        artist = None
-        try:
-            artist = yt.get_artist(seed_artist_id)
-        except _SIGNAL_ERRORS:
-            pass
-        if artist:
-            for s in (artist.get("songs") or {}).get("results", []):
-                add(s, _SOURCE_ARTIST)
-            related_artists = (artist.get("related") or {}).get("results", [])
-            for rel in related_artists[:_RELATED_ARTISTS_TO_EXPAND]:
-                rel_id = rel.get("browseId")
-                if not rel_id:
-                    continue
-                try:
-                    rel_artist = yt.get_artist(rel_id)
-                except _SIGNAL_ERRORS:
-                    continue
-                for s in (rel_artist.get("songs") or {}).get("results", []):
-                    add(s, _SOURCE_ARTIST)
-
-    return found
-
-
-def _merge_and_score(per_seed: list[dict[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
-    """Combine candidates from multiple seeds. Score = number of distinct
-    (seed, source) pairs that surfaced each candidate."""
-    merged: dict[str, dict[str, Any]] = {}
-    for found in per_seed:
-        for vid, data in found.items():
-            entry = merged.get(vid)
-            if entry is None:
-                entry = {
-                    "videoId": data["videoId"],
-                    "title": data["title"],
-                    "artists": data["artists"],
-                    "album": data["album"],
-                    "sources": set(),
-                    "score": 0,
-                }
-                merged[vid] = entry
-            entry["sources"] |= data["sources"]
-            entry["score"] += len(data["sources"])
-    return merged
-
-
-def _artist_names_match(candidate_artists: list[str], target_names_lower: list[str]) -> bool:
-    """Loose match (case-insensitive substring, either direction) between a
-    candidate's artist credits and a set of target names -- mirrors the
-    matching already used in _resolve_song_video_id, since search/catalog
-    artist-name formatting varies (features, "&" vs "feat.", etc)."""
-    for name in candidate_artists:
-        if not name:
-            continue
-        name_lower = name.lower()
-        if any(t in name_lower or name_lower in t for t in target_names_lower):
-            return True
-    return False
-
-
-def _filter_same_artist(merged: dict[str, dict[str, Any]], target_names: list[str]) -> dict[str, dict[str, Any]]:
-    """Restrict candidates to those crediting one of target_names. No-op if
-    target_names is empty (nothing to filter by)."""
-    targets_lower = [t.lower() for t in target_names if t]
-    if not targets_lower:
-        return merged
-    return {vid: c for vid, c in merged.items() if _artist_names_match(c["artists"], targets_lower)}
-
-
-def _finalize(merged: dict[str, dict[str, Any]], exclude: set[str], limit: int) -> list[dict[str, Any]]:
-    ranked = [c for vid, c in merged.items() if vid not in exclude]
-    ranked.sort(key=lambda c: (-c["score"], c.get("title") or ""))
-    return [
-        {
-            "videoId": c["videoId"],
-            "title": c["title"],
-            "artists": c["artists"],
-            "album": c["album"],
-            "score": c["score"],
-            "sources": sorted(c["sources"]),
-        }
-        for c in ranked[:limit]
-    ]
-
+# Candidate generation lives in signals.py, shared with the mood engine.
+# Re-exported here so existing callers and tests keep their import paths.
+from signals import (  # noqa: E402
+    _RELATED_ARTISTS_TO_EXPAND,
+    _SIGNAL_ERRORS,
+    _SOURCE_ARTIST,
+    _SOURCE_RADIO,
+    _SOURCE_RELATED,
+    _artist_names_match,
+    _filter_same_artist,
+    _finalize,
+    _gather_seed_candidates,
+    _merge_and_score,
+    _norm_track,
+)
 
 def _liked_video_ids(yt: YTMusic) -> set[str]:
     # get_liked_songs() defaults to only the most recent 100 items -- not
@@ -555,6 +417,180 @@ def refresh_library() -> dict[str, Any]:
         "tracks_excluded": len(ids),
         "cache_path": str(CACHE_PATH),
         "ttl_seconds": CACHE_TTL,
+    }
+
+
+# --- v2: mood ---------------------------------------------------------------
+
+
+@mcp.tool()
+@handle_errors
+def recommend_for_mood(
+    feeling: str | None = None,
+    vector: dict[str, float] | None = None,
+    context: str | None = None,
+    arc: str = "mirror",
+    limit: int = 20,
+    genres: list[str] | None = None,
+) -> dict[str, Any]:
+    """Recommend new songs that match how the listener actually feels right now.
+
+    Unlike recommend_from_song, the mood decides where candidates come from:
+    seeds are drawn from the listener's OWN library nearest the target mood,
+    then expanded through radio/related/artist signals and songs from YouTube's
+    mood playlists. Results are still guaranteed absent from their library.
+
+    Describing the mood -- in priority order:
+      `vector`  The precise path, and the one to prefer. A dict with
+                valence (-1..1, despairing->euphoric), energy (0..1,
+                still->frantic), tension (0..1, resolved->anxious; this is what
+                separates angry from excited) and depth (0..1, background
+                ->lyric-forward). YOU should read the user's words and set
+                these -- you understand "wistful but still wants to get things
+                done" far better than any keyword list.
+      `feeling` Their words verbatim, as a fallback when you'd rather not
+                commit to numbers. Matched against a mood-word lexicon.
+      `context` One of: Chill, Sleep, Focus, Commute, Feel good, Romance,
+                Energize, Workout, Party, Gaming, Sad.
+      If none are given, the mood is inferred from recent listening history.
+
+    `arc` shapes the sequence rather than returning a flat mood-matched set:
+      mirror  stay where they are and validate it (default)
+      lift    start where they are, rise gradually -- never jump straight to
+              upbeat when someone is low, it reads as being told to cheer up
+      settle  descend to calm; an evening wind-down
+      deepen  go further in; sometimes you want to sit in it properly
+      hold    stay in a band with energy as a curve (workout: warmup/peak/cooldown)
+
+    `genres` optionally restricts the seeds to the listener's own genre
+    playlists, e.g. ["Punjabi", "Hip-Hop & Rap"].
+
+    The result carries `target` (the mood aimed at), `target_origin` (where it
+    came from), `seeds` (which of their songs it grew from), `notes` (caveats
+    worth repeating to the user) and `songs`, each with its slot, mood fit and
+    which signals surfaced it.
+    """
+    import recommend
+    import store as _s
+
+    yt = _client()
+    conn = _store()
+    exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn)
+
+    result = recommend.build(
+        yt, conn, exclude=exclude, feeling=feeling, vector=vector,
+        context=context, arc=arc, limit=limit, genres=genres,
+    )
+    _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
+    return result
+
+
+@mcp.tool()
+@handle_errors
+def read_my_mood() -> dict[str, Any]:
+    """Infer the listener's current mood from recent listening, with evidence.
+
+    Returns the inferred `vector`, a plain-language `described`, a `confidence`,
+    and `evidence` -- the specific observations behind it (a song on repeat, one
+    artist dominating, valence drifting across the session).
+
+    Lead with the evidence, not the verdict. "You've had these three on loop
+    since yesterday -- want something that sits there with you, or something
+    that lifts?" is the point of this tool; asserting "you are sad" is not.
+    Mood inference is often wrong, so offer it as a read the user can correct.
+    """
+    import moodspace
+    import sense
+
+    read = sense.read_mood(_store(), _client())
+    return {
+        **read,
+        "described": moodspace.describe(read["vector"]) if read["vector"] else None,
+    }
+
+
+@mcp.tool()
+@handle_errors
+def explain_recommendation(video_id: str) -> dict[str, Any]:
+    """Explain why a song was recommended, in mood terms.
+
+    Reports the song's mood vector, which layer produced it (Claude reading the
+    lyrics, YouTube mood-playlist membership, or the artist's own average), the
+    named moods it sits closest to, and the mood it was last served against.
+    """
+    import label
+    import moodspace
+    import store as _s
+
+    conn = _store()
+    track = _s.get_track(conn, video_id) or {}
+    entry = label.resolve(conn, video_id)
+
+    served = conn.execute(
+        "SELECT served_at, feeling, arc, slot, valence, energy, tension, depth "
+        "FROM recommendation WHERE video_id = ? ORDER BY served_at DESC LIMIT 1",
+        (video_id,),
+    ).fetchone()
+
+    return {
+        "videoId": video_id,
+        "title": track.get("title"),
+        "artists": track.get("artists"),
+        "mood": entry["vector"] if entry else None,
+        "mood_source": entry["source"] if entry else None,
+        "confidence": entry["confidence"] if entry else None,
+        "described": moodspace.describe(entry["vector"]) if entry else None,
+        "closest_moods": [name for name, _ in moodspace.nearest_anchors(entry["vector"], 3)] if entry else [],
+        "atlas_playlists": _s.atlas_moods_for(conn, video_id)[:8],
+        "genre": label.genre_prior(conn, video_id),
+        "last_served_against": dict(served) if served else None,
+    }
+
+
+@mcp.tool()
+@handle_errors
+def record_feedback(video_id: str, reaction: str) -> dict[str, Any]:
+    """Record what the listener thought of a recommendation.
+
+    `reaction` is one of: loved, saved, skipped, wrong_mood.
+
+    `wrong_mood` is the valuable one -- it says the song was fine but the mood
+    read was off, which is a different failure from simply not liking it.
+    Anything marked skipped or wrong_mood is never recommended again.
+    """
+    import store as _s
+
+    allowed = {"loved", "saved", "skipped", "wrong_mood"}
+    if reaction not in allowed:
+        raise RuntimeError(f"reaction must be one of: {', '.join(sorted(allowed))}.")
+
+    _s.put_feedback(_store(), video_id, reaction)
+    return {"videoId": video_id, "reaction": reaction, "recorded": True}
+
+
+@mcp.tool()
+@handle_errors
+def index_status() -> dict[str, Any]:
+    """Report how much of the mood index exists, so gaps are visible not silent.
+
+    Covers the mood-playlist crawl, how much of the listener's library carries a
+    mood label and from which layer, and whether Claude-based labelling is
+    configured. Low coverage means recommendations are ranking mostly on signal
+    agreement rather than on mood -- worth saying out loud.
+    """
+    import judge
+    import label
+    import store as _s
+
+    conn = _store()
+    return {
+        "atlas": _s.atlas_stats(conn),
+        "library": label.library_coverage(conn),
+        "llm_labelling": {
+            "available": judge.available(),
+            "model": judge.MODEL,
+            "hint": None if judge.available() else "Install with: pip install -e '.[llm]' and run 'ant auth login'.",
+        },
     }
 
 

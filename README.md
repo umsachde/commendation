@@ -14,10 +14,113 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 | `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5)` | Recommend new songs based on an entire playlist (samples seed tracks from it). |
 | `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
 | `refresh_library()` | Force-rebuild the cached library exclusion set. See [Library cache](#library-cache). |
+| `recommend_for_mood(feeling=None, vector=None, context=None, arc="mirror", limit=20, genres=None)` | **v2.** Recommend new songs matching how you actually feel, shaped into a sequence that moves. See [Mood](#mood-aware-recommendations-v2). |
+| `read_my_mood()` | **v2.** Infer your current mood from recent listening, *with the evidence for it*. |
+| `explain_recommendation(video_id)` | **v2.** Why a song was picked, in mood terms. |
+| `record_feedback(video_id, reaction)` | **v2.** `loved` / `saved` / `skipped` / `wrong_mood`. Rejections are never recommended again. |
+| `index_status()` | **v2.** How much of the mood index exists, so gaps are visible instead of silent. |
 
 All three tools guarantee every result is absent from Liked Music *and* from every one of your playlists, not just the one you seeded from (if any). `recommend_from_song` additionally never returns the seed song itself; `recommend_from_playlist` additionally never returns anything from the seed playlist even if that playlist somehow isn't in your library listing.
 
 `songs_by_artist` is a different kind of tool from the other two: no scoring, no radio/related signals — just that artist's real catalog, with the same library-wide exclusion applied. It's a hard requirement, not best-effort: if fewer than `limit` qualifying songs exist, it returns however many were found (`found` in the response) rather than padding the list with substitutes. It never adds anything anywhere.
+
+## Mood-aware recommendations (v2)
+
+`recommend_from_song` answers *"what sounds like this?"*. `recommend_for_mood` answers a different
+question: *"what does this person need to hear right now?"*
+
+### Why this isn't just a filter
+
+Running the v1 engine and filtering its results by mood does not work — filter a Daft Punk radio for
+"melancholy" and you get the least danceable Daft-Punk-adjacent tracks, not melancholy music. So the mood
+decides **where candidates come from**:
+
+1. Resolve the mood to a vector.
+2. Pick seeds from **your own library** that already sit near it.
+3. Run v1's proven radio / related / artist expansion from those seeds.
+4. Add a fourth signal: songs from YouTube's mood playlists near the target — the only path that reaches
+   outside your existing taste graph.
+5. Rank on signal agreement × mood fit, then **assign songs to slots along an arc**.
+
+### The mood vector
+
+| Axis | Range | Low ←→ high |
+| --- | --- | --- |
+| `valence` | −1…1 | despairing ←→ euphoric |
+| `energy` | 0…1 | still ←→ frantic |
+| `tension` | 0…1 | resolved ←→ anxious. **Separates angry from excited** — two axes can't tell aggressive workout rap from joyful party pop |
+| `depth` | 0…1 | background wallpaper ←→ lyric-forward |
+
+Pass `vector` for precision, `feeling` for free text (matched against a mood-word lexicon), or `context`
+for one of YouTube's own moods. With none of them, the mood is inferred from your listening history.
+
+### Arcs
+
+A mood-matched *set* is the obvious thing to return and the wrong one. From music therapy's iso-principle:
+to shift someone's mood you meet them where they are and move gradually — opening with upbeat songs when
+someone is low just gets skipped.
+
+| Arc | Behaviour |
+| --- | --- |
+| `mirror` | Stay where they are and validate it. Default. |
+| `lift` | Start at their mood, rise gradually across the set. |
+| `settle` | Descend to calm — an evening wind-down. |
+| `deepen` | Go further in. |
+| `hold` | Stay in a band with energy as a curve (a workout is warmup → peak → cooldown). |
+
+### How a song's mood is known
+
+YouTube Music exposes **no audio features at all** — no tempo, key, valence or energy (verified against
+the live API; that's why BPM was dropped rather than built). So mood is assembled from four layers,
+cheapest first, and the best available source for a song wins outright:
+
+| Layer | What it is | Needs |
+| --- | --- | --- |
+| `llm` | Claude reads the lyrics. Handles any language, and irony. | Optional — `pip install -e ".[llm]"` |
+| `lyrics` | Lyrics fetched and cached (2 API calls/song, incl. the negative result) | — |
+| `atlas` | Membership in YouTube's own mood playlists — 2,223 of them across 11 placeable moods | A crawl |
+| `artist` | An artist's average mood, propagated to their unlabelled songs | Free |
+
+**The atlas alone is not enough, and measurably so.** On this account a 60-playlist sample covered 4.1% of
+the liked library, and the misses concentrate on the Punjabi, Bollywood and Reggae catalogue that
+YouTube's English-centric mood playlists barely touch. Artist propagation is what closes most of that gap
+without any API key; the Claude layer closes the rest.
+
+### Setup
+
+```bash
+# 1. Crawl the mood atlas (~35 min, resumable, safe to interrupt)
+python scripts/build_atlas.py
+
+# 2. Label your library (steps 1-3 need no credentials beyond YouTube Music)
+python scripts/label_library.py
+
+# 3. Optional: read lyrics with Claude to cover what the atlas missed
+pip install -e ".[llm]" && ant auth login
+python scripts/label_library.py --claude
+```
+
+Check progress any time with `python scripts/build_atlas.py --status`,
+`python scripts/label_library.py --report`, or the `index_status()` tool.
+
+Optionally, keep a real timeline of listening — `get_history()` reports only "Today"/"Yesterday", so
+local timestamps are the only clock this system will ever have:
+
+```
+0 */3 * * * cd /path/to/commendation && .venv/bin/python scripts/snapshot_history.py
+```
+
+### Configuration
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `COMMENDATION_DB_PATH` | `~/.commendation/store.db` | Mood index, labels, history, feedback. |
+| `COMMENDATION_JUDGE_MODEL` | `claude-opus-5` | Model for lyric-based labelling. |
+| `COMMENDATION_JUDGE_EFFORT` | `low` | Effort level for that labelling. |
+| `COMMENDATION_JUDGE_BATCH` | `12` | Songs per labelling request. |
+
+Everything mood-related is stored in local SQLite. The only thing that ever leaves the machine is,
+optionally, song titles and lyric excerpts sent to the Claude API for labelling.
 
 ## Library cache
 
@@ -115,7 +218,9 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-`server.py` is at 98% line coverage (77 tests). The uncovered lines are `_client()`'s real `YTMusic()` construction and the `if __name__ == "__main__"` entrypoint — neither meaningfully testable without a live auth session or actually running the server as a process — plus two branches in `_artist_names_match`/`_filter_same_artist`.
+197 tests, 97% line coverage across the whole project. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end. What remains uncovered is `_client()`'s real `YTMusic()` construction and the `if __name__ == "__main__"` entrypoints, neither meaningfully testable without a live auth session.
+
+`conftest.py` redirects both the library cache and the SQLite store to temp paths for every test, so runs never touch your real data.
 
 `scripts/test_recommend.py` is a separate, complementary smoke test that hits your real account (see Setup step 2) to sanity-check that auth and live recommendations actually work.
 

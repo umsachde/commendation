@@ -1,7 +1,7 @@
 [project]
 name = "commendation"
-version = "0.1.0"
-description = "MCP server that recommends new songs, guaranteed to exclude anything already in your library (v1 backend: YouTube Music)"
+version = "0.2.0"
+description = "MCP server that recommends new songs by mood, guaranteed to exclude anything already in your library (backend: YouTube Music)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -12,6 +12,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
+# Optional: mood labelling by reading lyrics with Claude. Everything else works
+# without it, on mood-playlist membership and artist propagation alone.
+llm = ["anthropic>=0.40"]
 
 [project.urls]
 Homepage = "https://github.com/umsachde/commendation"
