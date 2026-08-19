@@ -80,7 +80,25 @@ No ML needed for v1 — simple, explainable scoring:
   same as the rest of this server).
 - *(v2, not in v1)* `compare_bpm(...)` — not implemented. Needs a 3rd-party tempo data source decision first.
 
+## v2 — Mood-aware recommendation
+
+Fully designed in **`PLAN_V2.md`** — read that before starting any v2 work. Summary of what it changes
+relative to the open questions below:
+
+- **BPM is demoted, not built.** Probing `get_song()` against the real account confirms YouTube Music
+  exposes no tempo/key/audio features at all, and tempo is a poor mood proxy regardless. `PLAN_V2.md`
+  replaces it with a mood-vector model fed by YT's own mood-playlist taxonomy, lyrics, and an LLM judge.
+- **Mood/chart discovery as a 4th signal: yes** — `get_mood_categories()` returns 13 moods and
+  `get_mood_playlists()` yields 2,223 playlists across them, which becomes a mood-labeled corpus
+  (the "Mood Atlas"), not just an extra candidate source.
+- **Genre-taxonomy matching: yes** — the hand-curated `C - *` playlists supply a per-track genre prior,
+  used as a ranking term to stop cross-genre noise.
+- **Rate-limit budget: addressed in Phase 0** — a SQLite-cached library snapshot removes the ~20s
+  exclusion-set rebuild that currently runs on every single tool call.
+
 ## Open questions for v2 / future agents
+
+> Superseded by `PLAN_V2.md`; kept for the reasoning trail.
 
 - Which 3rd-party BPM/tempo API to use, and how to handle songs with no BPM coverage.
 - Should ranking incorporate genre-taxonomy matching (the same idea used to bucket a liked-songs library into "Bollywood/Hindi", "Punjabi", genre playlists elsewhere) to avoid cross-genre noise in results?
@@ -126,3 +144,22 @@ Not started. Open design questions for whichever agent picks this up:
 - Test suite grew from 34 → 57 tests alongside these changes (one test per new code path, not just happy-path coverage — signal-failure branches, shortfall/no-match/validation-error cases, and the belt-and-suspenders seed-playlist exclusion are all explicitly covered). Also closed 3 pre-existing gaps in `_gather_seed_candidates` (seed-artist lookup failure, a related-artist with no browseId, a related-artist lookup failure) found while auditing coverage.
 - `pytest-cov` added as a dev dependency; `server.py` line coverage is 98% (220 statements, 4 missed — `_client()`'s real YTMusic() construction and the `if __name__ == "__main__"` entrypoint, neither meaningfully unit-testable without a live auth session / actually running the server as a process). Run `pytest --cov=server --cov-report=term-missing` to reproduce.
 - README and this file were updated in the same commits as each change — no doc lagging behind code at end of session.
+
+**2026-08-19 (later session) — v2 Phase 0, first slice: library exclusion cache.**
+- Every tool call rebuilt the exclusion set from scratch: Liked Music (~1,100 tracks, 7.4s) plus all 28
+  playlists (~1,550 tracks, 12.0s). Measured at **20.5s of pure overhead per call.**
+- Now cached to `~/.commendation/library_cache.json` (~22 KB), TTL 6h, both configurable via
+  `COMMENDATION_CACHE_PATH` / `COMMENDATION_CACHE_TTL` (`0` disables caching).
+- **The novelty guarantee is preserved for likes, not just deferred.** A cache hit re-fetches only the
+  most recent page of Liked Music (`limit=100`, ~1.3s) and unions it in — measured because newly liked
+  songs land at the top of `LM`, so a bounded fetch catches them. The residual gap is a song added to a
+  *different* playlist within the TTL; `refresh_library()` (new tool) forces a rebuild for that, and the
+  three existing tools' docstrings point at it so an orchestrating agent knows to call it after writes.
+- Top-up failure degrades to the cached set rather than failing the call — same partial-results
+  philosophy already used for discovery signals.
+- Measured end-to-end on the real account: exclusion set 20.5s → 0.9s; `recommend_from_song` ~24s → 4.3s;
+  `songs_by_artist` ~22s → 2.6s.
+- Tests 60 → 77. New `conftest.py` autouse fixture redirects `CACHE_PATH` to a temp file per test, so the
+  suite can never read or write the developer's real cache. Coverage of the new code is complete.
+- Known pre-existing coverage gaps, untouched by this change: two branches in `_artist_names_match` /
+  `_filter_same_artist`, both introduced with `same_artist_only` in commit 128878f.
