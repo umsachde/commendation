@@ -1,0 +1,18 @@
+[project]
+name = "commendation"
+version = "0.1.0"
+description = "MCP server that recommends new YouTube Music songs, guaranteed to exclude anything already in your Liked Music"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "ytmusicapi>=1.12.2",
+    "mcp>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/umsachde/commendation"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
