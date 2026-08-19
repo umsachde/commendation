@@ -1,8 +1,10 @@
 # commendation
 
-An [MCP](https://modelcontextprotocol.io) server that recommends **new** YouTube Music songs — never a song already in your Liked Music, and never a song already in a playlist you seeded from.
+An [MCP](https://modelcontextprotocol.io) server that recommends **new** songs — never a song already in your library, and never a song already in a playlist you seeded from.
 
-It's built to do better than YouTube Music's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
+It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
+
+**Backend: YouTube Music (v1).** Commendation is designed as a general recommendation engine, not tied to one service — v1 is built entirely against YouTube Music (via `ytmusicapi`). Spotify support is planned as a second backend; see `PLAN.md`'s "v3 — Multi-provider support" section for the design questions around that.
 
 ## Tools
 
@@ -25,7 +27,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 2. Authenticate
+### 2. Authenticate (YouTube Music)
 
 There's no official YouTube Music API, so `ytmusicapi` authenticates by reusing headers from your logged-in browser session.
 

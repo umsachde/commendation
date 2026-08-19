@@ -1,7 +1,7 @@
 [project]
 name = "commendation"
 version = "0.1.0"
-description = "MCP server that recommends new YouTube Music songs, guaranteed to exclude anything already in your Liked Music"
+description = "MCP server that recommends new songs, guaranteed to exclude anything already in your library (v1 backend: YouTube Music)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

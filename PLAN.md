@@ -6,7 +6,9 @@
 
 ## Goal
 
-Recommend genuinely **new** songs based on a seed song or seed playlist — better than YouTube Music's built-in radio/autoplay, which the user has found mediocre and which resurfaces songs already in Liked Music. Commendation improves on radio by combining multiple independent discovery signals instead of trusting one algorithm, and guarantees novelty by hard-filtering anything the user has already liked (or, for playlist seeds, anything already in that playlist).
+Recommend genuinely **new** songs based on a seed song or seed playlist — better than a streaming service's built-in radio/autoplay, which the user has found mediocre and which resurfaces songs already liked. Commendation improves on radio by combining multiple independent discovery signals instead of trusting one algorithm, and guarantees novelty by hard-filtering anything the user has already liked (or, for playlist seeds, anything already in that playlist).
+
+Commendation is meant to be a **general song-recommendation engine, not tied to one streaming service.** v1 is built entirely against YouTube Music (via `ytmusicapi`) since that's the account/library available today, but nothing about the goal, ranking approach, or tool contract is YouTube-specific — v3 (see below) plans to add Spotify as a second backend.
 
 ## Hard requirements (non-negotiable)
 
@@ -67,6 +69,16 @@ No ML needed for v1 — simple, explainable scoring:
 - Rate-limit budget: playlist-seeded recs can trigger 25+ API calls per request (seeds × signals, including nested related-artist lookups). May need a call cap or caching layer if this proves slow or gets rate-limited in practice.
 - Should mood/chart-based discovery (`get_mood_playlists`, `get_charts`) be added as a 4th signal for more diversity?
 - Should `recommend_from_song` accept a search query instead of requiring a `videoId` up front (i.e. do the search internally)?
+
+## v3 — Multi-provider support (Spotify)
+
+Not started. Open design questions for whichever agent picks this up:
+
+- **Provider abstraction.** `_gather_seed_candidates`, `_liked_video_ids`, etc. are currently written directly against `ytmusicapi`. v3 needs some kind of provider interface (e.g. a `Provider` protocol with `get_seed_candidates`, `get_liked_ids`, `get_playlist_tracks` methods) so the scoring/ranking/exclusion logic in `_merge_and_score` / `_finalize` — which is already provider-agnostic — can run over either backend unchanged.
+- **Auth is a bigger difference than it looks.** YouTube Music auth here is a copy-pasted browser header (see README). Spotify uses real OAuth (client ID/secret, redirect URI, refresh token) via the Spotify Web API — a materially different setup flow, likely its own `scripts/setup_auth_spotify.py`.
+- **Signal parity isn't guaranteed.** Spotify's Web API has artist top-tracks and (historically) a recommendations/related-artists endpoint, but Spotify has been actively deprecating/restricting several discovery endpoints for newer app registrations — check current API access levels before assuming parity with the YouTube Music 3-signal design above.
+- **Tool contract question:** does `recommend_from_song`/`recommend_from_playlist` gain a `provider` argument, or does provider selection happen at the MCP-server-instance level (e.g. a separately configured `commendation-spotify` server)? Whichever it is, a single call should almost certainly stay within one provider — cross-provider merging (e.g. seeding from a YouTube Music playlist but recommending Spotify tracks) is out of scope unless a future agent has a concrete reason to want it.
+- **IDs are provider-specific.** `video_id` is currently baked into the tool signatures and output (`videoId` field) as YouTube Music terminology. This session deliberately left that rename undone (see git history/PLAN discussion around 2026-08-19) rather than doing it speculatively — but it's the first thing to revisit once a second provider actually exists, since Spotify track IDs/URIs aren't YouTube video IDs.
 
 ## Build status
 

@@ -1,8 +1,9 @@
-"""MCP server that recommends new YouTube Music songs.
+"""MCP server that recommends new songs.
 
-Combines multiple independent YouTube Music signals (radio, related content,
+Combines multiple independent discovery signals (radio, related content,
 artist catalog expansion) instead of trusting a single algorithm, and always
-excludes anything already in the user's Liked Music.
+excludes anything already in the user's library. v1 is backed by YouTube
+Music (via ytmusicapi); see PLAN.md for planned multi-provider support.
 """
 
 import functools
