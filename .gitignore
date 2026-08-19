@@ -11,3 +11,4 @@ oauth.json
 *.headers.json
 raw_headers.txt
 .env
+.coverage
