@@ -60,6 +60,17 @@ No ML needed for v1 — simple, explainable scoring:
 
 - `recommend_from_song(video_id, limit=20) -> list[{videoId, title, artists, album, score, sources}]`
 - `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5) -> list[{...}]`
+- `songs_by_artist(artist, limit=10) -> {artist, requested, found, songs: [{videoId, title, artists, album}]}`
+  — a deliberately different shape of tool from the two above. User-requested: "N songs by \[artist\]" is not
+  a similarity recommendation, it's a direct catalog pull. Resolves the artist name via `search(filter="artists")`,
+  pulls their real song catalog (`get_artist()`'s `songs.browseId` fed into `get_playlist` for full depth, falling
+  back to the short `songs.results` preview if that lookup fails or there's no browseId), and excludes anything
+  already in Liked Music **or in any of the user's playlists** — broader than `recommend_from_playlist`'s
+  single-seed-playlist exclusion, since there's no single "seed playlist" here. No scoring/sources fields since
+  there's no multi-signal ranking involved. Hard requirement (not best-effort): if fewer than `limit` qualifying
+  songs exist after exclusion, returns however many were found — `found` vs `requested` tells the caller whether
+  it fell short — rather than padding the list with worse substitutes. Never adds results anywhere (read-only,
+  same as the rest of this server).
 - *(v2, not in v1)* `compare_bpm(...)` — not implemented. Needs a 3rd-party tempo data source decision first.
 
 ## Open questions for v2 / future agents

@@ -20,14 +20,18 @@ import server
 from server import (
     AUTH_HELP,
     AUTH_PATH,
+    _artist_song_catalog,
     _finalize,
     _gather_seed_candidates,
     _liked_video_ids,
+    _library_video_ids,
     _merge_and_score,
     _norm_track,
+    _resolve_artist,
     handle_errors,
     recommend_from_playlist,
     recommend_from_song,
+    songs_by_artist,
 )
 
 
@@ -142,13 +146,25 @@ def test_finalize_sources_sorted_in_output():
 
 
 class _FakeYT:
-    def __init__(self, watch=None, related_sections=None, artists=None, playlists=None):
+    def __init__(
+        self,
+        watch=None,
+        related_sections=None,
+        artists=None,
+        playlists=None,
+        search_results=None,
+        library_playlists=None,
+    ):
         self._watch = watch or {}
         self._related_sections = related_sections or {}
         self._artists = artists or {}
         self._playlists = playlists or {}
+        self._search_results = search_results or {}
+        self._library_playlists = library_playlists if library_playlists is not None else []
         self.get_song_related_calls = []
         self.get_artist_calls = []
+        self.search_calls = []
+        self.get_playlist_calls = []
 
     def get_watch_playlist(self, videoId, limit=25, radio=True):
         result = self._watch.get(videoId)
@@ -171,12 +187,186 @@ class _FakeYT:
         return result
 
     def get_playlist(self, playlist_id, limit=None):
-        return self._playlists[playlist_id]
+        self.get_playlist_calls.append(playlist_id)
+        result = self._playlists[playlist_id]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def search(self, query, filter=None, limit=20):
+        self.search_calls.append((query, filter, limit))
+        result = self._search_results.get(query)
+        if isinstance(result, Exception):
+            raise result
+        return result or []
+
+    def get_library_playlists(self, limit=25):
+        return self._library_playlists
 
 
 def test_liked_video_ids_filters_missing_ids():
     yt = _FakeYT(playlists={"LM": {"tracks": [{"videoId": "a"}, {"videoId": "b"}, {"videoId": None}, {}]}})
     assert _liked_video_ids(yt) == {"a", "b"}
+
+
+# --- _library_video_ids --------------------------------------------------
+
+
+def test_library_video_ids_unions_liked_and_all_playlists():
+    yt = _FakeYT(
+        playlists={
+            "LM": {"tracks": [{"videoId": "liked1"}]},
+            "PL1": {"tracks": [{"videoId": "pl1song1"}, {"videoId": "pl1song2"}]},
+            "PL2": {"tracks": [{"videoId": "pl2song1"}, {"videoId": None}]},
+        },
+        library_playlists=[{"playlistId": "PL1"}, {"playlistId": "PL2"}],
+    )
+    assert _library_video_ids(yt) == {"liked1", "pl1song1", "pl1song2", "pl2song1"}
+
+
+def test_library_video_ids_skips_lm_entry_in_library_playlists_listing():
+    # get_library_playlists() can itself list "LM" -- must not double-fetch it.
+    yt = _FakeYT(
+        playlists={"LM": {"tracks": [{"videoId": "liked1"}]}},
+        library_playlists=[{"playlistId": "LM"}],
+    )
+    _library_video_ids(yt)
+    assert yt.get_playlist_calls.count("LM") == 1
+
+
+def test_library_video_ids_skips_playlist_that_fails_to_fetch():
+    yt = _FakeYT(
+        playlists={
+            "LM": {"tracks": []},
+            "PL1": YTMusicError("gone"),
+            "PL2": {"tracks": [{"videoId": "ok1"}]},
+        },
+        library_playlists=[{"playlistId": "PL1"}, {"playlistId": "PL2"}],
+    )
+    assert _library_video_ids(yt) == {"ok1"}
+
+
+# --- _resolve_artist / _artist_song_catalog -------------------------------
+
+
+def test_resolve_artist_returns_top_match():
+    yt = _FakeYT(search_results={"Oasis": [{"artist": "Oasis", "browseId": "UC1"}, {"artist": "Oasis Tribute"}]})
+    resolved = _resolve_artist(yt, "Oasis")
+    assert resolved == {"artist": "Oasis", "browseId": "UC1"}
+    assert yt.search_calls == [("Oasis", "artists", 1)]
+
+
+def test_resolve_artist_no_match_returns_none():
+    yt = _FakeYT(search_results={"Nobody": []})
+    assert _resolve_artist(yt, "Nobody") is None
+
+
+def test_artist_song_catalog_prefers_full_songs_playlist():
+    yt = _FakeYT(
+        artists={"UC1": {"songs": {"browseId": "VLPL1", "results": [{"videoId": "preview1"}]}}},
+        playlists={"VLPL1": {"tracks": [{"videoId": "full1"}, {"videoId": "full2"}]}},
+    )
+    catalog = _artist_song_catalog(yt, "UC1")
+    assert [t["videoId"] for t in catalog] == ["full1", "full2"]
+
+
+def test_artist_song_catalog_falls_back_to_preview_when_full_fetch_fails():
+    yt = _FakeYT(
+        artists={"UC1": {"songs": {"browseId": "VLPL1", "results": [{"videoId": "preview1"}]}}},
+        playlists={"VLPL1": YTMusicError("gone")},
+    )
+    catalog = _artist_song_catalog(yt, "UC1")
+    assert [t["videoId"] for t in catalog] == ["preview1"]
+
+
+def test_artist_song_catalog_falls_back_when_no_browse_id():
+    yt = _FakeYT(artists={"UC1": {"songs": {"browseId": None, "results": [{"videoId": "preview1"}]}}})
+    catalog = _artist_song_catalog(yt, "UC1")
+    assert [t["videoId"] for t in catalog] == ["preview1"]
+
+
+# --- songs_by_artist (integration) ----------------------------------------
+
+
+def test_songs_by_artist_excludes_liked_and_all_playlists(monkeypatch):
+    yt = _FakeYT(
+        search_results={"Test Artist": [{"artist": "Test Artist", "browseId": "UC1"}]},
+        artists={
+            "UC1": {
+                "songs": {
+                    "browseId": "VLPL1",
+                    "results": [],
+                }
+            }
+        },
+        playlists={
+            "VLPL1": {
+                "tracks": [
+                    {"videoId": "s1", "title": "Song 1", "artists": [{"name": "Test Artist"}]},
+                    {"videoId": "s2", "title": "Song 2 (liked)", "artists": [{"name": "Test Artist"}]},
+                    {"videoId": "s3", "title": "Song 3 (in a playlist)", "artists": [{"name": "Test Artist"}]},
+                ]
+            },
+            "LM": {"tracks": [{"videoId": "s2"}]},
+            "PL1": {"tracks": [{"videoId": "s3"}]},
+        },
+        library_playlists=[{"playlistId": "PL1"}],
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = songs_by_artist("Test Artist", limit=10)
+
+    assert result["artist"] == "Test Artist"
+    assert result["requested"] == 10
+    assert result["found"] == 1
+    assert [s["videoId"] for s in result["songs"]] == ["s1"]
+
+
+def test_songs_by_artist_reports_shortfall_instead_of_padding(monkeypatch):
+    yt = _FakeYT(
+        search_results={"Small Artist": [{"artist": "Small Artist", "browseId": "UC1"}]},
+        artists={"UC1": {"songs": {"browseId": "VLPL1", "results": []}}},
+        playlists={
+            "VLPL1": {"tracks": [{"videoId": f"s{i}", "title": f"Song {i}"} for i in range(7)]},
+            "LM": {"tracks": []},
+        },
+        library_playlists=[],
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = songs_by_artist("Small Artist", limit=10)
+
+    assert result["requested"] == 10
+    assert result["found"] == 7
+    assert len(result["songs"]) == 7
+
+
+def test_songs_by_artist_respects_limit(monkeypatch):
+    yt = _FakeYT(
+        search_results={"Big Artist": [{"artist": "Big Artist", "browseId": "UC1"}]},
+        artists={"UC1": {"songs": {"browseId": "VLPL1", "results": []}}},
+        playlists={
+            "VLPL1": {"tracks": [{"videoId": f"s{i}", "title": f"Song {i}"} for i in range(20)]},
+            "LM": {"tracks": []},
+        },
+        library_playlists=[],
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = songs_by_artist("Big Artist", limit=5)
+
+    assert result["requested"] == 5
+    assert result["found"] == 5
+    assert len(result["songs"]) == 5
+
+
+def test_songs_by_artist_no_artist_match_returns_zero_found(monkeypatch):
+    yt = _FakeYT(search_results={"Nobody": []})
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = songs_by_artist("Nobody", limit=10)
+
+    assert result == {"artist": None, "requested": 10, "found": 0, "songs": []}
 
 
 # --- _gather_seed_candidates --------------------------------------------

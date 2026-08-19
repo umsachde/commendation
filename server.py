@@ -220,6 +220,50 @@ def _liked_video_ids(yt: YTMusic) -> set[str]:
     return {t["videoId"] for t in liked.get("tracks", []) if t.get("videoId")}
 
 
+def _library_video_ids(yt: YTMusic) -> set[str]:
+    """Every videoId already in the user's library: Liked Music plus every
+    playlist they own, not just one seed playlist."""
+    ids = set(_liked_video_ids(yt))
+    for pl in yt.get_library_playlists(limit=None):
+        playlist_id = pl.get("playlistId")
+        if not playlist_id or playlist_id == "LM":
+            continue
+        try:
+            full = yt.get_playlist(playlist_id, limit=None)
+        except _SIGNAL_ERRORS:
+            continue
+        ids |= {t["videoId"] for t in full.get("tracks", []) if t.get("videoId")}
+    return ids
+
+
+def _resolve_artist(yt: YTMusic, artist: str) -> dict[str, Any] | None:
+    """Resolve a free-text artist name to a search result carrying its
+    channelId (`browseId`), or None if nothing matched."""
+    results = yt.search(artist, filter="artists", limit=1)
+    return results[0] if results else None
+
+
+def _artist_song_catalog(yt: YTMusic, channel_id: str) -> list[dict[str, Any]]:
+    """Pull an artist's actual song catalog -- not similarity candidates.
+
+    get_artist()'s own "songs" section is just a short top-songs preview.
+    Its browseId points to the artist's full "Songs" playlist on YT Music,
+    which is fetched for real catalog depth; the preview is a fallback if
+    that lookup is unavailable.
+    """
+    info = yt.get_artist(channel_id)
+    songs = info.get("songs") or {}
+    browse_id = songs.get("browseId")
+    if browse_id:
+        try:
+            full = yt.get_playlist(browse_id, limit=None)
+        except _SIGNAL_ERRORS:
+            full = None
+        if full and full.get("tracks"):
+            return full["tracks"]
+    return songs.get("results") or []
+
+
 # --- tools -------------------------------------------------------------
 
 
@@ -264,6 +308,50 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
 
     exclude = _liked_video_ids(yt) | {t["videoId"] for t in tracks}
     return _finalize(merged, exclude, limit)
+
+
+@mcp.tool()
+@handle_errors
+def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
+    """Return actual songs by a specific artist -- a direct catalog pull, not
+    a similarity recommendation like recommend_from_song/recommend_from_playlist.
+
+    Resolves `artist` (a name) to its YouTube Music channel and pulls its
+    real song catalog, excluding anything already in Liked Music OR in ANY
+    of the user's playlists (not just one, unlike recommend_from_playlist's
+    single-seed-playlist exclusion). Read-only: never adds results anywhere.
+
+    This is a hard requirement, not best-effort -- if fewer than `limit`
+    qualifying songs exist after exclusion, this returns however many were
+    actually found rather than padding the list. Check `found` vs
+    `requested` in the result to see whether it fell short.
+    """
+    yt = _client()
+    resolved = _resolve_artist(yt, artist)
+    if resolved is None or not resolved.get("browseId"):
+        return {"artist": None, "requested": limit, "found": 0, "songs": []}
+
+    catalog = _artist_song_catalog(yt, resolved["browseId"])
+    exclude = _library_video_ids(yt)
+
+    songs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in catalog:
+        track = _norm_track(item)
+        vid = track["videoId"]
+        if not vid or vid in exclude or vid in seen:
+            continue
+        seen.add(vid)
+        songs.append(track)
+        if len(songs) >= limit:
+            break
+
+    return {
+        "artist": resolved.get("artist"),
+        "requested": limit,
+        "found": len(songs),
+        "songs": songs,
+    }
 
 
 if __name__ == "__main__":

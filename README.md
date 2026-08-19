@@ -12,8 +12,11 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 | --- | --- |
 | `recommend_from_song(video_id, limit=20)` | Recommend new songs similar to a seed song. |
 | `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5)` | Recommend new songs based on an entire playlist (samples seed tracks from it). |
+| `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
 
-Both tools guarantee every result is absent from your Liked Music. `recommend_from_playlist` additionally guarantees every result is absent from the seed playlist itself.
+`recommend_from_song` and `recommend_from_playlist` guarantee every result is absent from your Liked Music; `recommend_from_playlist` additionally guarantees every result is absent from the seed playlist itself.
+
+`songs_by_artist` is a different kind of tool: no scoring, no radio/related signals — just that artist's real catalog, with anything already in Liked Music *or in any of your playlists* filtered out. It's a hard requirement, not best-effort: if fewer than `limit` qualifying songs exist, it returns however many were found (`found` in the response) rather than padding the list with substitutes. It never adds anything anywhere.
 
 **Not included (v1):** BPM/tempo-based comparison. YouTube Music doesn't expose tempo data, so this needs a second data source (e.g. a third-party BPM API) — a stretch goal for a future version, not part of this build. See `PLAN.md` for the full design rationale.
 
