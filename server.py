@@ -52,6 +52,8 @@ def handle_errors(fn):
             ) from e
         except json.JSONDecodeError as e:
             raise RuntimeError(f"YouTube Music returned an unexpected response. {AUTH_HELP}") from e
+        except YTMusicGatedError as e:
+            raise RuntimeError(f"This content is gated/restricted and unavailable: {e}") from e
         except YTMusicServerError as e:
             msg = str(e)
             if "HTTP 401" in msg or "HTTP 403" in msg:
@@ -61,8 +63,6 @@ def handle_errors(fn):
                     "YouTube Music is rate-limiting requests right now. Wait a bit and try again."
                 ) from e
             raise RuntimeError(f"YouTube Music server error: {msg}") from e
-        except YTMusicGatedError as e:
-            raise RuntimeError(f"This content is gated/restricted and unavailable: {e}") from e
         except YTMusicUserError as e:
             raise RuntimeError(str(e)) from e
         except YTMusicError as e:

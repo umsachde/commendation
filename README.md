@@ -64,6 +64,17 @@ claude mcp add commendation -s user \
 
 For other MCP clients (Claude Desktop, etc.), point them at the same command and env var using their respective config format.
 
+## Testing
+
+Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, error translation, and both tools end-to-end — against a hand-rolled fake YTMusic client. No network access or `headers_auth.json` required.
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+`scripts/test_recommend.py` is a separate, complementary smoke test that hits your real account (see Setup step 2) to sanity-check that auth and live recommendations actually work.
+
 ## How recommendations are ranked
 
 For each seed song, candidates are pulled from three independent signals:

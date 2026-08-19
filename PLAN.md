@@ -85,5 +85,7 @@ No ML needed for v1 — simple, explainable scoring:
 **Since the above was written:**
 - Git repo initialized, pushed to `github.com/umsachde/commendation` (`origin/main`).
 - Registered with Claude Code via `claude mcp add commendation -s user ...` — connected.
+- Added a real unit test suite (`tests/test_server.py`, 34 tests) against a fake YTMusic client — covers `_norm_track`, `_merge_and_score`, `_finalize`, `_gather_seed_candidates` (including the isinstance-guard regression and the related-artist expansion cap), `_liked_video_ids`, `handle_errors`, and both tools end-to-end. No network/auth needed; run with `pytest`.
+- Found and fixed a real bug this way: `handle_errors` caught `YTMusicServerError` before `YTMusicGatedError`, and since the latter subclasses the former, the gated-content branch was dead code — gated errors always fell through to the generic "server error" message instead of the clearer gated-specific one. Reordered the `except` clauses (subclass before superclass) to fix.
 
 **Aside (does not affect commendation, but happened during this build):** a `remove_from_playlist` tool was added to the separate `ytmusic-mcp` project to clean up a duplicate-track bug found in a "C - Country" playlist while smoke-testing `recommend_from_playlist` against real data. That's `ytmusic-mcp` maintenance, unrelated to commendation's own scope — mentioned here only so a future agent doesn't wonder why an unrelated commit landed mid-build.
