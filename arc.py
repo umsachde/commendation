@@ -37,9 +37,11 @@ _DESTINATIONS: dict[str, Callable[[dict[str, float]], dict[str, float]]] = {
 # early wastes the back half; too late and nothing actually moved.
 _ARRIVAL = 0.85
 
-# Peak energy lift at the middle of a "hold" arc -- a workout is warmup, peak,
-# cooldown, not a flat wall of intensity.
-_HOLD_PEAK = 0.22
+# How far below the target a "hold" arc starts and ends. The target IS the peak
+# -- a workout is warmup, peak, cooldown -- so the curve dips at the edges
+# rather than pushing above the middle. Adding energy instead would clamp to
+# 1.0 for exactly the high-energy moods this arc is for, flattening the curve.
+_HOLD_DIP = 0.22
 
 
 def targets(start: dict[str, float], arc: str, count: int) -> list[dict[str, float]]:
@@ -64,10 +66,10 @@ def targets(start: dict[str, float], arc: str, count: int) -> list[dict[str, flo
 
 
 def _hold_point(start: dict[str, float], progress: float) -> dict[str, float]:
-    # A single smooth hump: zero at both ends, peak in the middle.
+    # A single smooth hump: the middle sits at the target, the ends below it.
     hump = 1.0 - abs(progress - 0.5) * 2.0
     return moodspace.vector(
-        valence=start["valence"], energy=start["energy"] + _HOLD_PEAK * hump,
+        valence=start["valence"], energy=start["energy"] - _HOLD_DIP * (1.0 - hump),
         tension=start["tension"], depth=start["depth"],
     )
 

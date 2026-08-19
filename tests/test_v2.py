@@ -1027,3 +1027,13 @@ def test_build_records_the_identity_of_what_it_served(db):
     yt = _BuildYT({"seed": [{"videoId": "new1", "title": "New One", "artists": [{"name": "Fresh"}]}]})
     recommend.build(yt, db, exclude={"seed"}, feeling="heartbroken", limit=1)
     assert store.get_track(db, "new1")["title"] == "New One"
+
+
+def test_hold_arc_peaks_at_the_target_not_above_it(db):
+    # Workout sits at 0.95 energy. Adding a hump would clamp to 1.0 and flatten
+    # the curve for exactly the moods this arc exists for.
+    start = ms.ANCHORS["Workout"]
+    energies = [t["energy"] for t in arc.targets(start, "hold", 5)]
+    assert max(energies) == pytest.approx(start["energy"])
+    assert energies[0] < energies[2]
+    assert len(set(energies)) > 1  # a real curve, not a clamped flat line
