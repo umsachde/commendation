@@ -10,7 +10,7 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 
 | Tool | Description |
 | --- | --- |
-| `recommend_from_song(video_id, limit=20)` | Recommend new songs similar to a seed song. |
+| `recommend_from_song(video_id=None, song=None, artist=None, limit=20)` | Recommend new songs similar to a seed song. Pass `video_id` directly, or `song` (optionally with `artist`) to have the seed resolved via search — e.g. "songs that relate to Kryptonite by 3 Doors Down" needs no separate lookup first. |
 | `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5)` | Recommend new songs based on an entire playlist (samples seed tracks from it). |
 | `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
 
@@ -90,7 +90,7 @@ For each seed song, candidates are pulled from three independent signals:
 
 A candidate's score is how many distinct (seed, signal) combinations surfaced it — the more independent signals agree, the higher it ranks. Every result includes a `sources` field showing which signals surfaced it, so recommendations are explainable rather than a black box.
 
-Liked Music is excluded last, always, as a hard filter — no recommendation can ever be a song you've already liked.
+Liked Music and every playlist in your library are excluded last, always, as a hard filter — no recommendation can ever be a song you've already liked or already saved anywhere.
 
 ## Error handling
 

@@ -59,7 +59,13 @@ No ML needed for v1 — simple, explainable scoring:
 
 ## Tools (v1)
 
-- `recommend_from_song(video_id, limit=20) -> list[{videoId, title, artists, album, score, sources}]`
+- `recommend_from_song(video_id=None, song=None, artist=None, limit=20) -> list[{videoId, title, artists, album, score, sources}]`
+  — `video_id` and `song`/`artist` are alternative ways to specify the seed; exactly one path must be given.
+  When `song` is given instead of `video_id`, it's resolved to a videoId internally via `search(filter="songs")`
+  (`_resolve_song_video_id`), preferring a result whose artist credit loosely matches `artist` if given, else the
+  top search hit. Resolves the "recommend_from_song accept a search query" open question below — user asked for
+  "10 songs that relate to this song by this artist" to work without a separate lookup call first. Raises a clear
+  `RuntimeError` if neither `video_id` nor `song` is given, or if `song`/`artist` matches nothing.
 - `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5) -> list[{...}]`
 - `songs_by_artist(artist, limit=10) -> {artist, requested, found, songs: [{videoId, title, artists, album}]}`
   — a deliberately different shape of tool from the two above. User-requested: "N songs by \[artist\]" is not
@@ -80,7 +86,6 @@ No ML needed for v1 — simple, explainable scoring:
 - Should ranking incorporate genre-taxonomy matching (the same idea used to bucket a liked-songs library into "Bollywood/Hindi", "Punjabi", genre playlists elsewhere) to avoid cross-genre noise in results?
 - Rate-limit budget: playlist-seeded recs can trigger 25+ API calls per request (seeds × signals, including nested related-artist lookups). May need a call cap or caching layer if this proves slow or gets rate-limited in practice.
 - Should mood/chart-based discovery (`get_mood_playlists`, `get_charts`) be added as a 4th signal for more diversity?
-- Should `recommend_from_song` accept a search query instead of requiring a `videoId` up front (i.e. do the search internally)?
 
 ## v3 — Multi-provider support (Spotify)
 

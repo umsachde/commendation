@@ -243,6 +243,27 @@ def _resolve_artist(yt: YTMusic, artist: str) -> dict[str, Any] | None:
     return results[0] if results else None
 
 
+def _resolve_song_video_id(yt: YTMusic, song: str, artist: str | None = None) -> str | None:
+    """Resolve a free-text song title (optionally with an artist name) to a
+    videoId via search, so callers don't need to pre-resolve one themselves.
+
+    Prefers a search result whose artist name matches `artist` (loosely --
+    substring match, case-insensitive, since search titles/artist credits
+    vary in exact formatting); falls back to the top search hit otherwise.
+    """
+    query = f"{song} {artist}" if artist else song
+    results = yt.search(query, filter="songs", limit=10)
+    if not results:
+        return None
+    if artist:
+        artist_lower = artist.lower()
+        for r in results:
+            names = [a.get("name", "").lower() for a in (r.get("artists") or [])]
+            if any(artist_lower in n or n in artist_lower for n in names if n):
+                return r.get("videoId")
+    return results[0].get("videoId")
+
+
 def _artist_song_catalog(yt: YTMusic, channel_id: str) -> list[dict[str, Any]]:
     """Pull an artist's actual song catalog -- not similarity candidates.
 
@@ -269,8 +290,16 @@ def _artist_song_catalog(yt: YTMusic, channel_id: str) -> list[dict[str, Any]]:
 
 @mcp.tool()
 @handle_errors
-def recommend_from_song(video_id: str, limit: int = 20) -> list[dict[str, Any]]:
+def recommend_from_song(
+    video_id: str | None = None, song: str | None = None, artist: str | None = None, limit: int = 20
+) -> list[dict[str, Any]]:
     """Recommend new songs similar to a seed song.
+
+    Seed the search either with a known `video_id`, or with `song` (a free-text
+    title, optionally narrowed with `artist`) to have the seed resolved via
+    search internally -- e.g. "10 songs that relate to Kryptonite by 3 Doors
+    Down" needs no separate lookup first. Exactly one of `video_id` or `song`
+    must be given.
 
     Combines YouTube Music's radio, its separate "related" signal, and the
     seed artist's own catalog plus related artists' catalogs, then ranks by
@@ -279,6 +308,14 @@ def recommend_from_song(video_id: str, limit: int = 20) -> list[dict[str, Any]]:
     ANY of the user's playlists.
     """
     yt = _client()
+    if not video_id:
+        if not song:
+            raise RuntimeError("Provide either video_id or song (optionally with artist).")
+        video_id = _resolve_song_video_id(yt, song, artist)
+        if video_id is None:
+            desc = f"{song!r} by {artist!r}" if artist else repr(song)
+            raise RuntimeError(f"No song found matching {desc}.")
+
     candidates = _gather_seed_candidates(yt, video_id)
     merged = _merge_and_score([candidates])
     exclude = _library_video_ids(yt)

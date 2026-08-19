@@ -28,6 +28,7 @@ from server import (
     _merge_and_score,
     _norm_track,
     _resolve_artist,
+    _resolve_song_video_id,
     handle_errors,
     recommend_from_playlist,
     recommend_from_song,
@@ -555,7 +556,72 @@ def test_handle_errors_network_error():
         fn()
 
 
+# --- _resolve_song_video_id -----------------------------------------------
+
+
+def test_resolve_song_video_id_prefers_artist_match():
+    yt = _FakeYT(
+        search_results={
+            "Kryptonite 3 Doors Down": [
+                {"videoId": "cover1", "title": "Kryptonite", "artists": [{"name": "Cover Band"}]},
+                {"videoId": "orig1", "title": "Kryptonite", "artists": [{"name": "3 Doors Down"}]},
+            ]
+        }
+    )
+    assert _resolve_song_video_id(yt, "Kryptonite", "3 Doors Down") == "orig1"
+
+
+def test_resolve_song_video_id_falls_back_to_top_hit_without_artist_match():
+    yt = _FakeYT(search_results={"Some Song": [{"videoId": "top1", "title": "Some Song", "artists": []}]})
+    assert _resolve_song_video_id(yt, "Some Song") == "top1"
+
+
+def test_resolve_song_video_id_no_results_returns_none():
+    yt = _FakeYT(search_results={"Nothing Matches": []})
+    assert _resolve_song_video_id(yt, "Nothing Matches") is None
+
+
 # --- recommend_from_song / recommend_from_playlist (integration) --------
+
+
+def test_recommend_from_song_resolves_seed_from_song_and_artist(monkeypatch):
+    watch = {
+        "orig1": {
+            "tracks": [
+                {"videoId": "orig1", "title": "Kryptonite"},
+                {"videoId": "cand1", "title": "Candidate 1", "artists": [{"name": "A"}]},
+            ],
+            "related": None,
+        }
+    }
+    yt = _FakeYT(
+        watch=watch,
+        search_results={
+            "Kryptonite 3 Doors Down": [{"videoId": "orig1", "title": "Kryptonite", "artists": [{"name": "3 Doors Down"}]}]
+        },
+        playlists={"LM": {"tracks": []}},
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    results = recommend_from_song(song="Kryptonite", artist="3 Doors Down", limit=20)
+
+    assert [r["videoId"] for r in results] == ["cand1"]
+
+
+def test_recommend_from_song_no_match_raises(monkeypatch):
+    yt = _FakeYT(search_results={"Totally Fake Song": []})
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    with pytest.raises(RuntimeError, match="No song found"):
+        recommend_from_song(song="Totally Fake Song")
+
+
+def test_recommend_from_song_requires_video_id_or_song(monkeypatch):
+    yt = _FakeYT()
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    with pytest.raises(RuntimeError, match="Provide either"):
+        recommend_from_song()
 
 
 def test_recommend_from_song_excludes_liked(monkeypatch):
