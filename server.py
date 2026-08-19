@@ -111,11 +111,17 @@ def _norm_track(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _gather_seed_candidates(yt: YTMusic, seed_video_id: str) -> dict[str, dict[str, Any]]:
+def _gather_seed_candidates(
+    yt: YTMusic, seed_video_id: str, seed_artist_names: list[str] | None = None
+) -> dict[str, dict[str, Any]]:
     """Pull radio + related + artist-expansion candidates for one seed song.
 
     Returns videoId -> {normalized track fields..., "sources": set[str]}.
     A signal that fails is skipped rather than aborting the whole seed.
+
+    If `seed_artist_names` is passed, the seed track's own artist name(s) are
+    appended to it as a side effect -- lets callers recover the seed's artist
+    without a second lookup, e.g. to filter candidates down to that artist.
     """
     found: dict[str, dict[str, Any]] = {}
 
@@ -139,6 +145,8 @@ def _gather_seed_candidates(yt: YTMusic, seed_video_id: str) -> dict[str, dict[s
             add(t, _SOURCE_RADIO)
             if t.get("videoId") == seed_video_id and t.get("artists"):
                 seed_artist_id = t["artists"][0].get("id")
+                if seed_artist_names is not None:
+                    seed_artist_names.extend(a.get("name") for a in t["artists"] if a.get("name"))
 
         related_browse_id = watch.get("related")
         if related_browse_id:
@@ -195,6 +203,29 @@ def _merge_and_score(per_seed: list[dict[str, dict[str, Any]]]) -> dict[str, dic
             entry["sources"] |= data["sources"]
             entry["score"] += len(data["sources"])
     return merged
+
+
+def _artist_names_match(candidate_artists: list[str], target_names_lower: list[str]) -> bool:
+    """Loose match (case-insensitive substring, either direction) between a
+    candidate's artist credits and a set of target names -- mirrors the
+    matching already used in _resolve_song_video_id, since search/catalog
+    artist-name formatting varies (features, "&" vs "feat.", etc)."""
+    for name in candidate_artists:
+        if not name:
+            continue
+        name_lower = name.lower()
+        if any(t in name_lower or name_lower in t for t in target_names_lower):
+            return True
+    return False
+
+
+def _filter_same_artist(merged: dict[str, dict[str, Any]], target_names: list[str]) -> dict[str, dict[str, Any]]:
+    """Restrict candidates to those crediting one of target_names. No-op if
+    target_names is empty (nothing to filter by)."""
+    targets_lower = [t.lower() for t in target_names if t]
+    if not targets_lower:
+        return merged
+    return {vid: c for vid, c in merged.items() if _artist_names_match(c["artists"], targets_lower)}
 
 
 def _finalize(merged: dict[str, dict[str, Any]], exclude: set[str], limit: int) -> list[dict[str, Any]]:
@@ -291,7 +322,11 @@ def _artist_song_catalog(yt: YTMusic, channel_id: str) -> list[dict[str, Any]]:
 @mcp.tool()
 @handle_errors
 def recommend_from_song(
-    video_id: str | None = None, song: str | None = None, artist: str | None = None, limit: int = 20
+    video_id: str | None = None,
+    song: str | None = None,
+    artist: str | None = None,
+    limit: int = 20,
+    same_artist_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Recommend new songs similar to a seed song.
 
@@ -306,6 +341,12 @@ def recommend_from_song(
     how many independent signals agreed on each candidate. Never returns the
     seed song itself, and never returns a song already in Liked Music or in
     ANY of the user's playlists.
+
+    By default candidates can come from OTHER artists too (radio/related
+    signals surface stylistically similar tracks, not just the seed artist's
+    own catalog) -- pass `same_artist_only=True` to keep only songs credited
+    to the seed's own artist(s), e.g. for "recommend songs BY artist X similar
+    to song Y" requests.
     """
     yt = _client()
     if not video_id:
@@ -316,8 +357,11 @@ def recommend_from_song(
             desc = f"{song!r} by {artist!r}" if artist else repr(song)
             raise RuntimeError(f"No song found matching {desc}.")
 
-    candidates = _gather_seed_candidates(yt, video_id)
+    seed_artist_names: list[str] = []
+    candidates = _gather_seed_candidates(yt, video_id, seed_artist_names)
     merged = _merge_and_score([candidates])
+    if same_artist_only:
+        merged = _filter_same_artist(merged, seed_artist_names or ([artist] if artist else []))
     exclude = _library_video_ids(yt)
     return _finalize(merged, exclude, limit)
 

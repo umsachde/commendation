@@ -736,6 +736,77 @@ def test_recommend_from_song_excludes_songs_in_any_playlist_not_just_liked(monke
     assert "inplaylist1" not in ids
 
 
+def test_recommend_from_song_same_artist_only_filters_other_artists(monkeypatch):
+    seed = "seed1"
+    watch = {
+        seed: {
+            "tracks": [
+                {"videoId": seed, "title": "Where Are You Now", "artists": [{"name": "Lost Frequencies", "id": "artist1"}]},
+                {"videoId": "other1", "title": "Other Artist Song", "artists": [{"name": "Someone Else"}]},
+            ],
+            "related": None,
+        }
+    }
+    artists = {
+        "artist1": {
+            "songs": {"results": [{"videoId": "lf1", "title": "LF Song", "artists": [{"name": "Lost Frequencies"}]}]},
+            "related": {"results": []},
+        }
+    }
+    yt = _FakeYT(watch=watch, artists=artists, playlists={"LM": {"tracks": []}})
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    results = recommend_from_song(seed, limit=20, same_artist_only=True)
+
+    ids = [r["videoId"] for r in results]
+    assert ids == ["lf1"]
+    assert "other1" not in ids
+
+
+def test_recommend_from_song_same_artist_only_uses_artist_param_when_seed_lookup_lacks_artists(monkeypatch):
+    watch = {
+        "orig1": {
+            "tracks": [
+                {"videoId": "orig1", "title": "Kryptonite"},
+                {"videoId": "cand1", "title": "Candidate", "artists": [{"name": "3 Doors Down"}]},
+                {"videoId": "cand2", "title": "Unrelated", "artists": [{"name": "Someone Else"}]},
+            ],
+            "related": None,
+        }
+    }
+    yt = _FakeYT(
+        watch=watch,
+        search_results={
+            "Kryptonite 3 Doors Down": [{"videoId": "orig1", "title": "Kryptonite", "artists": [{"name": "3 Doors Down"}]}]
+        },
+        playlists={"LM": {"tracks": []}},
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    results = recommend_from_song(song="Kryptonite", artist="3 Doors Down", limit=20, same_artist_only=True)
+
+    assert [r["videoId"] for r in results] == ["cand1"]
+
+
+def test_recommend_from_song_same_artist_only_false_by_default(monkeypatch):
+    seed = "seed1"
+    watch = {
+        seed: {
+            "tracks": [
+                {"videoId": seed, "title": "Seed", "artists": [{"name": "Lost Frequencies", "id": "artist1"}]},
+                {"videoId": "other1", "title": "Other Artist Song", "artists": [{"name": "Someone Else"}]},
+            ],
+            "related": None,
+        }
+    }
+    yt = _FakeYT(watch=watch, artists={"artist1": {"songs": {"results": []}, "related": {"results": []}}}, playlists={"LM": {"tracks": []}})
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    results = recommend_from_song(seed, limit=20)
+
+    assert [r["videoId"] for r in results] == ["other1"]
+
+
 def test_recommend_from_playlist_excludes_seed_playlist_and_liked(monkeypatch):
     tracks = [{"videoId": "t1"}, {"videoId": "t2"}]
     watch = {
