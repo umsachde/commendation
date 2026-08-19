@@ -13,10 +13,41 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 | `recommend_from_song(video_id=None, song=None, artist=None, limit=20)` | Recommend new songs similar to a seed song. Pass `video_id` directly, or `song` (optionally with `artist`) to have the seed resolved via search — e.g. "songs that relate to Kryptonite by 3 Doors Down" needs no separate lookup first. |
 | `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5)` | Recommend new songs based on an entire playlist (samples seed tracks from it). |
 | `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
+| `refresh_library()` | Force-rebuild the cached library exclusion set. See [Library cache](#library-cache). |
 
 All three tools guarantee every result is absent from Liked Music *and* from every one of your playlists, not just the one you seeded from (if any). `recommend_from_song` additionally never returns the seed song itself; `recommend_from_playlist` additionally never returns anything from the seed playlist even if that playlist somehow isn't in your library listing.
 
 `songs_by_artist` is a different kind of tool from the other two: no scoring, no radio/related signals — just that artist's real catalog, with the same library-wide exclusion applied. It's a hard requirement, not best-effort: if fewer than `limit` qualifying songs exist, it returns however many were found (`found` in the response) rather than padding the list with substitutes. It never adds anything anywhere.
+
+## Library cache
+
+Every recommendation excludes anything already in your library, which means building a set of every
+videoId in Liked Music plus all of your playlists. Measured against a real account (~1,100 liked songs,
+28 playlists, ~1,550 playlist tracks) that costs **~20 seconds** — and v1 paid it on every single tool call.
+
+That set is now cached on disk. Measured on the same account:
+
+| | Before | After |
+| --- | --- | --- |
+| Building the exclusion set | 20.5s | 0.9s |
+| `recommend_from_song` end to end | ~24s | 4.3s |
+| `songs_by_artist` end to end | ~22s | 2.6s |
+
+**Liking a song still takes effect immediately.** A cache hit re-fetches only the most recently liked
+songs (one page, ~1s) and unions them in, so the novelty guarantee holds for the mutation you actually
+make most. The case a cache hit can miss is a song added to some *other* playlist within the TTL — call
+`refresh_library()` after doing that if it matters, e.g. right after a playlist-management tool adds tracks.
+
+If the top-up fetch fails, the cached set is used as-is rather than failing the call — a slightly older
+exclusion set beats no recommendation, the same partial-results philosophy used for discovery signals.
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `COMMENDATION_CACHE_PATH` | `~/.commendation/library_cache.json` | Where the cached set lives (~22 KB). |
+| `COMMENDATION_CACHE_TTL` | `21600` (6 hours) | How long a cached set stays usable. **Set to `0` to disable caching** and rebuild on every call. |
+
+The cache is written atomically (temp file + rename), and a missing, unreadable, malformed or expired
+cache is treated as a miss rather than an error — worst case you pay the ~20s rebuild v1 always paid.
 
 **Not included (v1):** BPM/tempo-based comparison. YouTube Music doesn't expose tempo data, so this needs a second data source (e.g. a third-party BPM API) — a stretch goal for a future version, not part of this build. See `PLAN.md` for the full design rationale.
 
@@ -71,7 +102,7 @@ For other MCP clients (Claude Desktop, etc.), point them at the same command and
 
 ## Testing
 
-Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, artist/song search resolution, error translation, and all three tools end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake YTMusic client. No network access or `headers_auth.json` required.
+Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, library-cache behaviour (hits, misses, expiry, corruption, top-up, write failures), artist/song search resolution, error translation, and every tool end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake YTMusic client. No network access or `headers_auth.json` required. A `conftest.py` fixture redirects the library cache to a temp path for every test, so runs never touch your real cache.
 
 ```bash
 pip install -e ".[dev]"
@@ -84,7 +115,7 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-`server.py` is at 98% line coverage; the two lines that remain uncovered are `_client()`'s real `YTMusic()` construction and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live auth session or actually running the server as a process.
+`server.py` is at 98% line coverage (77 tests). The uncovered lines are `_client()`'s real `YTMusic()` construction and the `if __name__ == "__main__"` entrypoint — neither meaningfully testable without a live auth session or actually running the server as a process — plus two branches in `_artist_names_match`/`_filter_same_artist`.
 
 `scripts/test_recommend.py` is a separate, complementary smoke test that hits your real account (see Setup step 2) to sanity-check that auth and live recommendations actually work.
 

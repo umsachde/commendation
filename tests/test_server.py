@@ -6,6 +6,7 @@ scripts/test_recommend.py, which is a real-account smoke test.
 """
 
 import json
+import time
 
 import pytest
 import requests
@@ -21,16 +22,21 @@ from server import (
     AUTH_HELP,
     AUTH_PATH,
     _artist_song_catalog,
+    _build_library_video_ids,
     _finalize,
     _gather_seed_candidates,
     _liked_video_ids,
     _library_video_ids,
     _merge_and_score,
     _norm_track,
+    _read_cache,
+    _recent_liked_video_ids,
     _resolve_artist,
     _resolve_song_video_id,
+    _write_cache,
     handle_errors,
     recommend_from_playlist,
+    refresh_library,
     recommend_from_song,
     songs_by_artist,
 )
@@ -166,6 +172,8 @@ class _FakeYT:
         self.get_artist_calls = []
         self.search_calls = []
         self.get_playlist_calls = []
+        self.get_playlist_limits = []
+        self.get_library_playlists_calls = 0
 
     def get_watch_playlist(self, videoId, limit=25, radio=True):
         result = self._watch.get(videoId)
@@ -189,6 +197,7 @@ class _FakeYT:
 
     def get_playlist(self, playlist_id, limit=None):
         self.get_playlist_calls.append(playlist_id)
+        self.get_playlist_limits.append(limit)
         result = self._playlists[playlist_id]
         if isinstance(result, Exception):
             raise result
@@ -202,6 +211,7 @@ class _FakeYT:
         return result or []
 
     def get_library_playlists(self, limit=25):
+        self.get_library_playlists_calls += 1
         return self._library_playlists
 
 
@@ -873,3 +883,151 @@ def test_recommend_from_playlist_samples_when_over_seed_size(monkeypatch):
     # only the first 3 tracks should have been used as seeds
     seeded_ids = {t["videoId"] for t in tracks[:3]}
     assert seeded_ids == {"t0", "t1", "t2"}
+
+
+# --- library exclusion cache ------------------------------------------------
+
+
+def _cache_fake(liked=("liked1",), playlist_tracks=("pl1song1",)):
+    """A fake whose library is one liked song plus one one-song playlist."""
+    return _FakeYT(
+        playlists={
+            "LM": {"tracks": [{"videoId": v} for v in liked]},
+            "PL1": {"tracks": [{"videoId": v} for v in playlist_tracks]},
+        },
+        library_playlists=[{"playlistId": "PL1"}],
+    )
+
+
+def test_library_cache_miss_builds_fully_and_writes_cache(isolated_cache):
+    yt = _cache_fake()
+    assert _library_video_ids(yt) == {"liked1", "pl1song1"}
+    assert yt.get_library_playlists_calls == 1
+
+    written = json.loads(isolated_cache.read_text())
+    assert sorted(written["video_ids"]) == ["liked1", "pl1song1"]
+    assert written["fetched_at"] <= time.time()
+
+
+def test_library_cache_hit_skips_the_expensive_playlist_walk():
+    # The whole point of the cache: a hit must not re-walk every playlist.
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    yt.get_library_playlists_calls = 0
+    yt.get_playlist_calls.clear()
+
+    assert _library_video_ids(yt) == {"liked1", "pl1song1"}
+    assert yt.get_library_playlists_calls == 0
+    assert yt.get_playlist_calls == ["LM"]  # recent-likes top-up only
+
+
+def test_library_cache_hit_tops_up_with_recently_liked_songs():
+    # A song liked after the cache was built must still be excluded, without
+    # waiting out the TTL -- that's what keeps the novelty guarantee honest.
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    yt._playlists["LM"]["tracks"].append({"videoId": "just_liked"})
+
+    assert "just_liked" in _library_video_ids(yt)
+
+
+def test_library_cache_top_up_uses_a_bounded_fetch_not_the_whole_playlist():
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    yt.get_playlist_limits.clear()
+
+    _library_video_ids(yt)
+    assert yt.get_playlist_limits == [server.RECENT_LIKES_LIMIT]
+
+
+def test_library_cache_top_up_failure_falls_back_to_cached_ids():
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    yt._playlists["LM"] = YTMusicError("transient")
+
+    # Degraded, not broken: a slightly older set beats no recommendation.
+    assert _library_video_ids(yt) == {"liked1", "pl1song1"}
+
+
+def test_library_cache_expired_triggers_rebuild(isolated_cache):
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    stale = json.loads(isolated_cache.read_text())
+    stale["fetched_at"] = time.time() - server.CACHE_TTL - 1
+    isolated_cache.write_text(json.dumps(stale))
+    yt.get_library_playlists_calls = 0
+
+    _library_video_ids(yt)
+    assert yt.get_library_playlists_calls == 1
+
+
+def test_library_cache_disabled_when_ttl_not_positive(monkeypatch):
+    monkeypatch.setattr(server, "CACHE_TTL", 0)
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    _library_video_ids(yt)
+    assert yt.get_library_playlists_calls == 2
+
+
+def test_force_refresh_bypasses_a_fresh_cache():
+    yt = _cache_fake()
+    _library_video_ids(yt)
+    yt.get_library_playlists_calls = 0
+
+    _library_video_ids(yt, force_refresh=True)
+    assert yt.get_library_playlists_calls == 1
+
+
+@pytest.mark.parametrize(
+    "contents",
+    ["not json at all", '{"video_ids": ["a"]}', '{"fetched_at": "nope", "video_ids": []}'],
+)
+def test_corrupt_or_incomplete_cache_is_a_miss_not_an_error(isolated_cache, contents):
+    isolated_cache.write_text(contents)
+    assert _read_cache() is None
+
+    yt = _cache_fake()
+    assert _library_video_ids(yt) == {"liked1", "pl1song1"}
+
+
+def test_missing_cache_file_is_a_miss():
+    assert _read_cache() is None
+
+
+def test_non_string_ids_in_cache_are_dropped(isolated_cache):
+    isolated_cache.write_text(json.dumps({"fetched_at": time.time(), "video_ids": ["ok", None, 7]}))
+    ids, _ = _read_cache()
+    assert ids == {"ok"}
+
+
+def test_write_cache_failure_is_non_fatal(monkeypatch, tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a directory")
+    monkeypatch.setattr(server, "CACHE_PATH", blocker / "library_cache.json")
+
+    _write_cache({"a"})  # must not raise
+    yt = _cache_fake()
+    assert _library_video_ids(yt) == {"liked1", "pl1song1"}
+
+
+def test_recent_liked_video_ids_filters_missing_ids():
+    yt = _FakeYT(playlists={"LM": {"tracks": [{"videoId": "a"}, {"videoId": None}, {}]}})
+    assert _recent_liked_video_ids(yt) == {"a"}
+
+
+def test_build_library_video_ids_ignores_the_cache_entirely(isolated_cache):
+    isolated_cache.write_text(json.dumps({"fetched_at": time.time(), "video_ids": ["stale_only"]}))
+    yt = _cache_fake()
+    assert _build_library_video_ids(yt) == {"liked1", "pl1song1"}
+
+
+def test_refresh_library_rebuilds_and_reports(monkeypatch, isolated_cache):
+    isolated_cache.write_text(json.dumps({"fetched_at": time.time(), "video_ids": ["stale_only"]}))
+    yt = _cache_fake()
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = refresh_library()
+    assert result["tracks_excluded"] == 2
+    assert result["ttl_seconds"] == server.CACHE_TTL
+    assert yt.get_library_playlists_calls == 1
+    assert sorted(json.loads(isolated_cache.read_text())["video_ids"]) == ["liked1", "pl1song1"]

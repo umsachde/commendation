@@ -10,6 +10,8 @@ import functools
 import json
 import os
 import random
+import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -22,6 +24,17 @@ AUTH_HELP = (
     f"YouTube Music auth at {AUTH_PATH} looks invalid or expired. "
     "Re-run scripts/setup_auth_from_file.py to refresh it (see README)."
 )
+
+# Rebuilding the library exclusion set costs ~20s of API calls (Liked Music
+# plus every playlist), and every tool needs it. It's cached on disk instead;
+# see _library_video_ids for how staleness is bounded.
+_DEFAULT_CACHE_PATH = Path.home() / ".commendation" / "library_cache.json"
+CACHE_PATH = Path(os.environ.get("COMMENDATION_CACHE_PATH") or _DEFAULT_CACHE_PATH)
+# Seconds a cached exclusion set stays usable. <= 0 disables caching entirely.
+CACHE_TTL = int(os.environ.get("COMMENDATION_CACHE_TTL", 6 * 60 * 60))
+# How many of the most recently liked songs to re-check on every cache hit.
+# ytmusicapi pages this, so the real count returned is typically ~2x.
+RECENT_LIKES_LIMIT = 100
 
 mcp = MCPServer("commendation")
 
@@ -251,9 +264,18 @@ def _liked_video_ids(yt: YTMusic) -> set[str]:
     return {t["videoId"] for t in liked.get("tracks", []) if t.get("videoId")}
 
 
-def _library_video_ids(yt: YTMusic) -> set[str]:
-    """Every videoId already in the user's library: Liked Music plus every
-    playlist they own, not just one seed playlist."""
+def _recent_liked_video_ids(yt: YTMusic) -> set[str]:
+    """The most recently liked songs only -- one page, ~1s instead of ~7s.
+
+    Newly liked songs land at the top of Liked Music, so this is what keeps a
+    cached exclusion set honest about the mutation users actually make most.
+    """
+    recent = yt.get_playlist("LM", limit=RECENT_LIKES_LIMIT)
+    return {t["videoId"] for t in recent.get("tracks", []) if t.get("videoId")}
+
+
+def _build_library_video_ids(yt: YTMusic) -> set[str]:
+    """Full rebuild: Liked Music plus every playlist the user owns. ~20s."""
     ids = set(_liked_video_ids(yt))
     for pl in yt.get_library_playlists(limit=None):
         playlist_id = pl.get("playlistId")
@@ -264,6 +286,71 @@ def _library_video_ids(yt: YTMusic) -> set[str]:
         except _SIGNAL_ERRORS:
             continue
         ids |= {t["videoId"] for t in full.get("tracks", []) if t.get("videoId")}
+    return ids
+
+
+def _read_cache() -> tuple[set[str], float] | None:
+    """Return (ids, fetched_at) if a usable, unexpired cache exists, else None.
+
+    A cache that is missing, unreadable, malformed, or expired is simply a
+    miss -- never an error. The worst case is the ~20s rebuild we already had.
+    """
+    if CACHE_TTL <= 0:
+        return None
+    try:
+        raw = json.loads(CACHE_PATH.read_text())
+        fetched_at = float(raw["fetched_at"])
+        ids = {v for v in raw["video_ids"] if isinstance(v, str)}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if time.time() - fetched_at > CACHE_TTL:
+        return None
+    return ids, fetched_at
+
+
+def _write_cache(ids: set[str]) -> float:
+    """Persist the exclusion set, returning the timestamp recorded for it.
+
+    Written via a temp file + rename so an interrupted write can't leave a
+    half-written cache behind. Failure to write is non-fatal -- the caller
+    already has the data it needs.
+    """
+    fetched_at = time.time()
+    payload = json.dumps({"fetched_at": fetched_at, "video_ids": sorted(ids)})
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE_PATH.with_suffix(CACHE_PATH.suffix + ".tmp")
+        tmp.write_text(payload)
+        tmp.replace(CACHE_PATH)
+    except OSError:
+        pass
+    return fetched_at
+
+
+def _library_video_ids(yt: YTMusic, force_refresh: bool = False) -> set[str]:
+    """Every videoId already in the user's library: Liked Music plus every
+    playlist they own, not just one seed playlist.
+
+    Cached on disk (see CACHE_PATH / CACHE_TTL) because a full rebuild costs
+    ~20s and every tool call needs it. On a cache hit the most recently liked
+    songs are still fetched fresh (~1s) and unioned in, so liking a song takes
+    effect immediately rather than waiting out the TTL. Adding a song to some
+    other playlist is the case a hit can miss; refresh_library() forces a
+    rebuild for that.
+    """
+    if not force_refresh:
+        cached = _read_cache()
+        if cached is not None:
+            ids, _ = cached
+            try:
+                return ids | _recent_liked_video_ids(yt)
+            except _SIGNAL_ERRORS:
+                # Top-up is an optimization, not a correctness requirement --
+                # the cached set is still a valid (if slightly older) answer.
+                return ids
+
+    ids = _build_library_video_ids(yt)
+    _write_cache(ids)
     return ids
 
 
@@ -347,6 +434,10 @@ def recommend_from_song(
     own catalog) -- pass `same_artist_only=True` to keep only songs credited
     to the seed's own artist(s), e.g. for "recommend songs BY artist X similar
     to song Y" requests.
+
+    The library exclusion set is cached for speed; newly liked songs are
+    always honoured, but call refresh_library() after adding songs to a
+    playlist by other means.
     """
     yt = _client()
     if not video_id:
@@ -376,6 +467,10 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     candidate generation as recommend_from_song for each, and pools/ranks the
     results. Never returns a song already in Liked Music, already in the
     source playlist, or already in ANY other of the user's playlists.
+
+    The library exclusion set is cached for speed; newly liked songs are
+    always honoured, but call refresh_library() after adding songs to a
+    playlist by other means.
     """
     yt = _client()
     playlist = yt.get_playlist(playlist_id, limit=None)
@@ -407,6 +502,10 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
     qualifying songs exist after exclusion, this returns however many were
     actually found rather than padding the list. Check `found` vs
     `requested` in the result to see whether it fell short.
+
+    The library exclusion set is cached for speed; newly liked songs are
+    always honoured, but call refresh_library() after adding songs to a
+    playlist by other means.
     """
     yt = _client()
     resolved = _resolve_artist(yt, artist)
@@ -433,6 +532,29 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
         "requested": limit,
         "found": len(songs),
         "songs": songs,
+    }
+
+
+@mcp.tool()
+@handle_errors
+def refresh_library() -> dict[str, Any]:
+    """Rebuild the cached library exclusion set from scratch, right now.
+
+    Every recommendation tool excludes songs already in Liked Music or any of
+    your playlists. That set is expensive to build (~20s), so it's cached and
+    reused. Liking a song is picked up immediately regardless, but adding a
+    song to some other playlist is only seen once the cache is rebuilt.
+
+    Call this after adding songs to a playlist by other means (e.g. a
+    playlist-management tool) if you want the next recommendation to account
+    for them without waiting out the cache TTL.
+    """
+    yt = _client()
+    ids = _library_video_ids(yt, force_refresh=True)
+    return {
+        "tracks_excluded": len(ids),
+        "cache_path": str(CACHE_PATH),
+        "ttl_seconds": CACHE_TTL,
     }
 
 
