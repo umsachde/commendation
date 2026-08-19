@@ -588,10 +588,17 @@ _similarity_.** As a similarity and sequencing signal it is genuinely useful, wh
   170bpm drum-and-bass and 85bpm hip-hop share a pulse.
 - **Never propagated by artist**, unlike mood. An artist's songs share a sensibility, not a tempo;
   propagating it would invent data. This asymmetry with `label.propagate_by_artist` is deliberate.
-- **Coverage measured before building**, and it is uneven in the now-familiar way: 6/6 on Pop, 4/6 on
-  Rock and Reggae, 1/6 on Punjabi and Bollywood. Verified the misses are genuine `bpm: 0` rather than
-  failed matching — every test track resolved to the correct song, and scanning deeper into search
-  results finds nothing. So fuzzy matching would not help, and **unknown tempo never drops a song.**
+- **Coverage measured across the full library: 541 of 1,495 songs (36.2%)**, uneven in the now-familiar
+  way — Rock 67%, R&B 64%, Pop 60%, Hip-Hop 47%, but Bollywood/Hindi 16% and Punjabi 6%. The misses are
+  genuine: those songs resolve to the correct Deezer track and carry `bpm: 0`. **Unknown tempo never
+  drops a song.**
+- **One matching bug, worth recording precisely because the first correction overstated it.** 318 songs
+  came back unmatched; the artist gate was rejecting real hits for messy YouTube credits
+  ("Billboard Top 100 Hits", "Shankar Mahadevan | Alyssa Men"). A title-only fallback (guarded by a
+  normalised-title equality check) reclassified 129 of them — but yielded only **+24 actual BPMs, 34.5%
+  to 36.2%**, because those songs mostly have no tempo in Deezer either. The fix improved the accounting
+  more than the coverage, and the original "the gap is real missing data" reading was closer to right
+  than the correction to it.
 
 ### Language filtering
 

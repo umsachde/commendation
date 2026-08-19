@@ -64,20 +64,25 @@ def lookup(title: str, artist: str | None = None, sleep=time.sleep) -> tuple[flo
     if not title:
         return None, STATUS_NO_MATCH, None
 
-    query = urllib.parse.quote(f"{title} {artist}".strip()[:180])
-    try:
-        results = _get(f"{API}/search?q={query}&limit={MAX_CANDIDATES}")
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+    hits = _search(f"{title} {artist}".strip(), sleep) if artist else []
+    matching = [h for h in hits if _artist_matches((h.get("artist") or {}).get("name", ""), artist)]
+
+    if not matching:
+        # The artist gate is too strict for real YouTube credits -- compilation
+        # uploads ("Billboard Top 100 Hits") and odd separators ("Shankar
+        # Mahadevan | Alyssa Men") match nothing on Deezer, which reported 318
+        # library songs as unmatched when most were simply findable by title.
+        # Fall back to a title-only search, guarded by a title equality check so
+        # this can't quietly attach some other song's tempo.
+        for hit in _search(title, sleep):
+            if _same_title(hit.get("title"), title):
+                matching.append(hit)
+
+    if not matching and not hits:
         return None, STATUS_NO_MATCH, None
 
-    hits = results.get("data") or []
-    if not hits:
-        return None, STATUS_NO_MATCH, None
-
-    first_id = hits[0].get("id")
-    for hit in hits:
-        if artist and not _artist_matches((hit.get("artist") or {}).get("name", ""), artist):
-            continue
+    first_id = (matching[0] if matching else hits[0]).get("id")
+    for hit in matching:
         sleep(THROTTLE)
         try:
             detail = _get(f"{API}/track/{hit['id']}")
@@ -87,7 +92,24 @@ def lookup(title: str, artist: str | None = None, sleep=time.sleep) -> tuple[flo
         if bpm:
             return float(bpm), STATUS_OK, hit["id"]
 
-    return None, STATUS_NO_BPM, first_id
+    return None, (STATUS_NO_BPM if matching else STATUS_NO_MATCH), first_id
+
+
+def _search(query: str, sleep) -> list[dict[str, Any]]:
+    if not query.strip():
+        return []
+    encoded = urllib.parse.quote(query.strip()[:180])
+    try:
+        return (_get(f"{API}/search?q={encoded}&limit={MAX_CANDIDATES}") or {}).get("data") or []
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return []
+
+
+def _same_title(candidate: str | None, wanted: str | None) -> bool:
+    """Guard for the title-only fallback: normalised titles must actually match."""
+    import signals
+
+    return bool(candidate and wanted and signals._song_key(candidate) == signals._song_key(wanted))
 
 
 def get_or_fetch(conn: Any, video_id: str, title: str, artist: str | None, sleep=time.sleep) -> float | None:

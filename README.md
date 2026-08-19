@@ -200,10 +200,19 @@ recommend_for_mood(context="Workout", bpm_min=120, bpm_max=140)
 - Tempo is **never propagated by artist**, unlike mood — an artist's songs share a
   sensibility, not a BPM. Propagating it would be inventing data.
 
-**Coverage is uneven and the response says so.** Measured on this library: 6/6 on Pop, 4/6
-on Rock and Reggae, 1/6 on Punjabi and Bollywood. The misses are genuine — the songs are on
-Deezer with `bpm: 0`, verified by checking that matching succeeded and deeper result scans
-find nothing. So **a song with unknown BPM is never dropped**, only left unscored on tempo;
+**Coverage is uneven, and the response says so.** Measured across the whole library —
+541 of 1,495 songs (36.2%):
+
+| | | | |
+| --- | --- | --- | --- |
+| Rock & Alternative | 67% | Hip-Hop & Rap | 47% |
+| R&B & Soul | 64% | Electronic & Dance | 38% |
+| Pop | 60% | **Bollywood/Hindi** | **16%** |
+| Country | 56% | **Punjabi** | **6%** |
+| Reggae & Dancehall | 49% | | |
+
+The misses are genuine: those songs resolve to the correct track on Deezer and simply carry
+`bpm: 0`. So **a song with unknown BPM is never dropped**, only left unscored on tempo —
 dropping them would quietly delete whole languages from the results.
 
 Build the index with `python scripts/build_tempo.py` (~0.4s/song, cached permanently

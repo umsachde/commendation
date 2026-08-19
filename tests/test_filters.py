@@ -405,3 +405,35 @@ def test_tempo_resolution_is_limited_to_a_shortlist(db, monkeypatch):
     candidates = [_candidate(f"v{i}", "T", "X") for i in range(20)]
     filters.apply_tempo(db, candidates, target_bpm=120, shortlist=5)
     assert len(calls) == 5
+
+
+def test_lookup_falls_back_to_a_title_only_search(monkeypatch):
+    # Real YouTube credits like "Billboard Top 100 Hits" match no Deezer artist,
+    # which reported 318 library songs as unmatched when most were findable.
+    class _ByQuery:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, url):
+            self.calls.append(url)
+            if "/search" in url:
+                # The artist-gated query finds a differently-credited upload.
+                return {"data": [{"id": 1, "title": "Trumpets", "artist": {"name": "Sak Noel"}}]}
+            return {1: {"bpm": 164.06}}[int(url.rsplit("/", 1)[-1])]
+
+    monkeypatch.setattr(tempo, "_get", _ByQuery())
+    bpm, status, _ = tempo.lookup("Trumpets", "Billboard Top 100 Hits", sleep=lambda _s: None)
+    assert (bpm, status) == (164.06, tempo.STATUS_OK)
+
+
+def test_title_only_fallback_will_not_attach_another_songs_tempo(monkeypatch):
+    monkeypatch.setattr(tempo, "_get", _FakeDeezer(
+        results=[{"id": 1, "title": "A Completely Different Song", "artist": {"name": "Someone"}}],
+        tracks={1: {"bpm": 140.0}},
+    ))
+    assert tempo.lookup("Jaane Kyon Log Pyar", "Udit Narayan", sleep=lambda _s: None)[1] == tempo.STATUS_NO_MATCH
+
+
+def test_title_match_ignores_bracketed_qualifiers():
+    assert tempo._same_title("Kamariya (From \"Stree\")", "Kamariya")
+    assert not tempo._same_title("Kamariya", "Something Else")
