@@ -115,6 +115,28 @@ Not started. Open design questions for whichever agent picks this up:
 - **Tool contract question:** does `recommend_from_song`/`recommend_from_playlist` gain a `provider` argument, or does provider selection happen at the MCP-server-instance level (e.g. a separately configured `commendation-spotify` server)? Whichever it is, a single call should almost certainly stay within one provider — cross-provider merging (e.g. seeding from a YouTube Music playlist but recommending Spotify tracks) is out of scope unless a future agent has a concrete reason to want it.
 - **IDs are provider-specific.** `video_id` is currently baked into the tool signatures and output (`videoId` field) as YouTube Music terminology. This session deliberately left that rename undone (see git history/PLAN discussion around 2026-08-19) rather than doing it speculatively — but it's the first thing to revisit once a second provider actually exists, since Spotify track IDs/URIs aren't YouTube video IDs.
 
+## v4 — Respect native YouTube Music dislikes
+
+Not started. User-requested (2026-08-19): never recommend a song the user has thumbs-downed on YouTube
+Music, the same way Liked Music is already a hard exclusion.
+
+- **No bulk API for this.** `ytmusicapi`'s `YTMusic` client has `get_liked_songs()` but no
+  `get_disliked_songs()` counterpart — confirmed by enumerating its public methods. A song's `likeStatus`
+  (`LIKE` / `DISLIKE` / `INDIFFERENT`) is only exposed per-song (via `get_watch_playlist`/`get_song`) or
+  inside `get_history()`'s most recent 200 items. There is no single call that returns "every disliked
+  song," unlike the `LM` playlist ID that makes Liked Music a one-shot fetch.
+- **Implication: this has to be a persistent log, not a snapshot fetch.** The exclusion set can't be
+  rebuilt fresh each call the way `_library_video_ids` is. Likely shape: extend
+  `scripts/snapshot_history.py` (already run on a cron for the mood-sensing timeline) to read `likeStatus`
+  off each history item and upsert `DISLIKE` rows into a new `store.py` table or into `feedback` with
+  `source="native_dislike"` — reusing the existing `rejected_video_ids()`-style exclusion machinery in
+  `recommend.py` rather than inventing a second filter path.
+- **Coverage will be partial and grows only over time.** A song disliked once but never appearing again in
+  a 200-item history window would never be observed. Worth stating plainly in the tool/README docs rather
+  than implying a complete guarantee the way the Liked Music exclusion can.
+- Deliberately kept out of v2/v3 scope — it's an orthogonal exclusion concern, not mood or multi-provider
+  work, and the no-bulk-API constraint makes it a real design task rather than a quick addition.
+
 ## Build status
 
 **Done:**
