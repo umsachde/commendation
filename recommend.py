@@ -164,12 +164,13 @@ def pick_seeds(conn: Any, target: dict[str, float], count: int = SEED_COUNT, gen
                 "videoId": video_id,
                 "title": track.get("title"),
                 "artists": track.get("artists"),
-                "fit": moodspace.fit(entry["vector"], target) * max(entry["confidence"], 0.2),
+                "fit": moodspace.fit(entry["vector"], target),
+                "seed_score": moodspace.seed_score(entry["vector"], target, entry["confidence"]),
                 "mood": entry["vector"],
             }
         )
 
-    scored.sort(key=lambda s: -s["fit"])
+    scored.sort(key=lambda s: -s["seed_score"])
 
     # Spread seeds across artists: six songs by one artist is a radio station,
     # not a mood.
@@ -336,7 +337,11 @@ def build(
         "target_origin": resolved["origin"],
         "described": moodspace.describe(target),
         "arc": arc,
-        "seeds": [{"title": s["title"], "artists": s["artists"], "fit": round(s["fit"], 3)} for s in seeds],
+        "seeds": [
+            {"title": s["title"], "artists": s["artists"], "fit": round(s["fit"], 3),
+             "seed_score": round(s["seed_score"], 3)}
+            for s in seeds
+        ],
         "notes": notes,
         "songs": ordered,
     }

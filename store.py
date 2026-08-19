@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS atlas_membership (
     mood           TEXT NOT NULL,
     playlist_id    TEXT NOT NULL,
     playlist_title TEXT,
-    PRIMARY KEY (video_id, playlist_id)
+    PRIMARY KEY (video_id, playlist_id, mood)
 );
 CREATE INDEX IF NOT EXISTS idx_atlas_video ON atlas_membership (video_id);
 CREATE INDEX IF NOT EXISTS idx_atlas_mood  ON atlas_membership (mood);
@@ -45,12 +45,13 @@ CREATE INDEX IF NOT EXISTS idx_atlas_mood  ON atlas_membership (mood);
 -- expired auth, a closed laptop -- so every playlist is recorded as it lands
 -- and the crawler resumes from here instead of starting over.
 CREATE TABLE IF NOT EXISTS atlas_crawl (
-    playlist_id TEXT PRIMARY KEY,
-    mood        TEXT,
+    playlist_id TEXT NOT NULL,
+    mood        TEXT NOT NULL,
     title       TEXT,
     track_count INTEGER,
     status      TEXT,
-    crawled_at  REAL
+    crawled_at  REAL,
+    PRIMARY KEY (playlist_id, mood)
 );
 
 -- Mood vectors, one row per (song, source). Sources are kept separate rather
@@ -242,27 +243,33 @@ def record_playlist(
         if rows:
             conn.executemany(
                 "INSERT INTO atlas_membership (video_id, mood, playlist_id, playlist_title) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(video_id, playlist_id) DO NOTHING",
+                "VALUES (?, ?, ?, ?) ON CONFLICT(video_id, playlist_id, mood) DO NOTHING",
                 rows,
             )
         conn.execute(
             "INSERT INTO atlas_crawl (playlist_id, mood, title, track_count, status, crawled_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(playlist_id) DO UPDATE SET "
-            "  mood = excluded.mood, title = excluded.title, "
-            "  track_count = excluded.track_count, status = excluded.status, "
-            "  crawled_at = excluded.crawled_at",
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(playlist_id, mood) DO UPDATE SET "
+            "  title = excluded.title, track_count = excluded.track_count, "
+            "  status = excluded.status, crawled_at = excluded.crawled_at",
             (playlist_id, mood, title, len(rows), status, time.time()),
         )
     upsert_tracks(conn, tracks)
     return len(rows)
 
 
-def crawled_playlist_ids(conn: sqlite3.Connection) -> set[str]:
-    """Playlists already crawled successfully -- the resume point. Failures are
-    excluded so an interrupted or rate-limited playlist is retried."""
+def crawled_playlist_moods(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """(playlist_id, mood) pairs already crawled successfully -- the resume point.
+
+    Keyed on the pair, not the playlist: YouTube lists the same playlist under
+    several moods, and each listing is a separate piece of evidence. Keying on
+    playlist_id alone skipped 874 of 1,979 listings on a real crawl, throwing
+    away every mood after the first one that happened to be crawled.
+
+    Failures are excluded, so an interrupted or rate-limited listing is retried.
+    """
     return {
-        r["playlist_id"]
-        for r in conn.execute("SELECT playlist_id FROM atlas_crawl WHERE status = 'ok'")
+        (r["playlist_id"], r["mood"])
+        for r in conn.execute("SELECT playlist_id, mood FROM atlas_crawl WHERE status = 'ok'")
     }
 
 

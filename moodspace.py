@@ -33,6 +33,15 @@ _SPAN = {"valence": 2.0, "energy": 1.0, "tension": 1.0, "depth": 1.0}
 # for avoiding specific wrong answers rather than for finding right ones.
 _WEIGHT = {"valence": 1.0, "energy": 1.0, "tension": 0.7, "depth": 0.6}
 
+# How much being *distinctly* the requested mood counts, relative to simply
+# being close to it. Above ~1 the distinctiveness term dominates, which is
+# intended: raw fit alone demonstrably picks the same bland songs for every mood.
+DISTINCTIVENESS_WEIGHT = 1.5
+
+# How much of the seed score confidence can swing. At 0.3, a maximally
+# confident label is worth 1.0x and a wholly unconfident one 0.7x.
+CONFIDENCE_FLOOR = 0.3
+
 _BOUNDS = {"valence": (-1.0, 1.0), "energy": (0.0, 1.0), "tension": (0.0, 1.0), "depth": (0.0, 1.0)}
 
 # Hand-authored positions for YouTube Music's own "Moods & moments" taxonomy.
@@ -85,6 +94,38 @@ def fit(a: dict[str, float], b: dict[str, float]) -> float:
     """Distance expressed as a 0..1 score, 1 being a perfect match. This is the
     form ranking wants -- a multiplier, not a penalty."""
     return max(0.0, 1.0 - distance(a, b) / _MAX_DISTANCE)
+
+
+def relative_fit(vec: dict[str, float], target: dict[str, float]) -> float:
+    """Fit to `target`, minus how well this vector fits moods in general.
+
+    Raw fit has a serious failure mode as a *selection* score: a vector near the
+    centre of the space fits everything moderately well, so bland songs beat
+    distinctive ones for every mood. Measured on real data -- "Africa" by Toto
+    sits at valence 0.53 / energy 0.53, fits all eleven anchors between 0.57 and
+    0.92, and was the top seed for heartbroken, angry, Party AND Focus alike.
+    Appearing in many mood playlists also maxes out its confidence, compounding
+    the problem.
+
+    Subtracting the vector's mean fit across all anchors removes that advantage.
+    A central vector scores near zero; a vector that is distinctly one mood
+    scores high for that mood and negative for the others.
+    """
+    baseline = sum(fit(vec, anchor) for anchor in ANCHORS.values()) / len(ANCHORS)
+    return fit(vec, target) - baseline
+
+
+def seed_score(vec: dict[str, float], target: dict[str, float], confidence: float = 1.0) -> float:
+    """How good a song is as a *seed* for a mood, as opposed to how close it is.
+
+    Absolute fit still matters -- a distinctive song for the wrong mood is no
+    use -- but distinctiveness is weighted more heavily, because that is what
+    raw fit systematically undervalues. Confidence is softened rather than
+    multiplied straight in: a confident bland label should not beat an
+    uncertain distinctive one.
+    """
+    combined = fit(vec, target) + DISTINCTIVENESS_WEIGHT * relative_fit(vec, target)
+    return combined * (1.0 - CONFIDENCE_FLOOR + CONFIDENCE_FLOOR * max(0.0, min(1.0, confidence)))
 
 
 def blend(weighted: Iterable[tuple[dict[str, float], float]]) -> dict[str, float] | None:

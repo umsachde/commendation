@@ -101,8 +101,8 @@ def crawl(
     successes, which means the next run retries exactly those.
     """
     todo = enumerate_playlists(yt, moods, sleep=sleep)
-    already = store.crawled_playlist_ids(conn)
-    remaining = [entry for entry in todo if entry[1] not in already]
+    already = store.crawled_playlist_moods(conn)
+    remaining = [entry for entry in todo if (entry[1], entry[0]) not in already]
     pending = remaining[:limit] if limit is not None else remaining
 
     stats = {

@@ -181,14 +181,14 @@ def test_sequence_stops_when_the_pool_runs_out():
 def test_record_playlist_stores_membership_and_checkpoint(db):
     n = store.record_playlist(db, "PL1", "Sad", "Breakups", [{"videoId": "a"}, {"videoId": "b"}])
     assert n == 2
-    assert store.crawled_playlist_ids(db) == {"PL1"}
+    assert store.crawled_playlist_moods(db) == {("PL1", "Sad")}
     assert store.atlas_mood_counts(db, "a") == {"Sad": 1}
 
 
 def test_failed_playlist_is_not_treated_as_crawled(db):
     # Otherwise a rate-limited playlist would be skipped forever on resume.
     store.record_playlist(db, "PL1", "Sad", None, [], status="failed")
-    assert store.crawled_playlist_ids(db) == set()
+    assert store.crawled_playlist_moods(db) == set()
 
 
 def test_artist_names_accepts_raw_and_normalised_shapes(db):
@@ -1037,3 +1037,100 @@ def test_hold_arc_peaks_at_the_target_not_above_it(db):
     assert max(energies) == pytest.approx(start["energy"])
     assert energies[0] < energies[2]
     assert len(set(energies)) > 1  # a real curve, not a clamped flat line
+
+
+def test_one_playlist_listed_under_two_moods_records_both(db):
+    # YouTube lists the same playlist under several moods. Keying the resume
+    # point on playlist_id alone dropped 874 of 1,979 listings on a real crawl.
+    store.record_playlist(db, "PL1", "Chill", "Mixed", [{"videoId": "a"}])
+    store.record_playlist(db, "PL1", "Commute", "Mixed", [{"videoId": "a"}])
+    assert store.atlas_mood_counts(db, "a") == {"Chill": 1, "Commute": 1}
+    assert store.crawled_playlist_moods(db) == {("PL1", "Chill"), ("PL1", "Commute")}
+
+
+def test_crawl_revisits_a_playlist_under_a_different_mood(db):
+    yt = _FakeYT(
+        categories={"Moods & moments": [
+            {"title": "Chill", "params": "p-chill"},
+            {"title": "Commute", "params": "p-commute"},
+        ]},
+        mood_playlists={
+            "p-chill": [{"playlistId": "PL1", "title": "Mixed"}],
+            "p-commute": [{"playlistId": "PL1", "title": "Mixed"}],
+        },
+        playlists={"PL1": {"tracks": [{"videoId": "a"}]}},
+    )
+    stats = atlas.crawl(yt, db, moods=["Chill", "Commute"], sleep=_noop_sleep)
+    assert stats["ok"] == 2
+    assert sorted(store.atlas_mood_counts(db, "a")) == ["Chill", "Commute"]
+
+
+# --- distinctiveness scoring -----------------------------------------------
+
+
+def _central_vector():
+    """A vector at the middle of the space -- fits everything, is nothing."""
+    return ms.blend([(anchor, 1.0) for anchor in ms.ANCHORS.values()])
+
+
+def test_a_central_vector_has_a_narrower_spread_than_a_distinctive_one():
+    # The anchors aren't uniformly distributed (Sad is an outlier), so a central
+    # vector isn't equidistant from all of them. What matters is that it never
+    # stands out strongly for any single mood the way a distinctive song does.
+    def spread(vec):
+        scores = [ms.relative_fit(vec, anchor) for anchor in ms.ANCHORS.values()]
+        return max(scores) - min(scores)
+
+    assert spread(_central_vector()) < spread(ms.ANCHORS["Sad"])
+
+
+def test_a_central_vector_is_never_strongly_its_own_mood():
+    central = _central_vector()
+    best = max(ms.relative_fit(central, anchor) for anchor in ms.ANCHORS.values())
+    assert best < ms.relative_fit(ms.ANCHORS["Sad"], ms.ANCHORS["Sad"])
+
+
+def test_relative_fit_is_positive_for_its_own_mood_and_negative_elsewhere():
+    sad = ms.ANCHORS["Sad"]
+    assert ms.relative_fit(sad, sad) > 0.2
+    assert ms.relative_fit(sad, ms.ANCHORS["Party"]) < 0
+
+
+def test_seed_score_prefers_a_distinctive_song_over_a_bland_one():
+    # The bug this exists for: raw fit made one bland song the top seed for
+    # heartbroken, angry, Party and Focus alike.
+    sad, central = ms.ANCHORS["Sad"], _central_vector()
+    assert ms.seed_score(sad, sad, 0.6) > ms.seed_score(central, sad, 1.0)
+
+
+def test_a_central_song_does_not_win_every_mood():
+    central = _central_vector()
+    for target in (ms.ANCHORS["Sad"], ms.ANCHORS["Party"], ms.ANCHORS["Focus"], ms.ANCHORS["Workout"]):
+        assert ms.seed_score(target, target, 1.0) > ms.seed_score(central, target, 1.0)
+
+
+def test_confidence_shifts_seed_score_without_dominating_it():
+    sad, central = ms.ANCHORS["Sad"], _central_vector()
+    assert ms.seed_score(sad, sad, 1.0) > ms.seed_score(sad, sad, 0.0)
+    # ...but even at zero confidence, distinctive still beats confident-and-bland.
+    assert ms.seed_score(sad, sad, 0.0) > ms.seed_score(central, sad, 1.0)
+
+
+def test_seed_score_clamps_out_of_range_confidence():
+    sad = ms.ANCHORS["Sad"]
+    assert ms.seed_score(sad, sad, 5.0) == pytest.approx(ms.seed_score(sad, sad, 1.0))
+    assert ms.seed_score(sad, sad, -5.0) == pytest.approx(ms.seed_score(sad, sad, 0.0))
+
+
+def test_pick_seeds_ranks_by_distinctiveness_not_raw_fit(db):
+    store.sync_library(db, [("bland", "Liked Music", True), ("distinct", "Liked Music", True)])
+    store.upsert_tracks(db, [
+        {"videoId": "bland", "title": "Bland", "artists": ["A"]},
+        {"videoId": "distinct", "title": "Distinct", "artists": ["B"]},
+    ])
+    store.put_track_moods(db, "atlas", [
+        ("bland", _central_vector(), 1.0),          # maximum confidence, no character
+        ("distinct", ms.ANCHORS["Sad"], 0.5),       # half the confidence, unmistakably sad
+    ])
+    seeds = recommend.pick_seeds(db, ms.ANCHORS["Sad"], count=2)
+    assert seeds[0]["videoId"] == "distinct"
