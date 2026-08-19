@@ -12,8 +12,9 @@ Commendation is meant to be a **general song-recommendation engine, not tied to 
 
 ## Hard requirements (non-negotiable)
 
-- Recommendations must **never** include a song already in Liked Music (playlist ID `LM`).
-- When seeded by a playlist, recommendations must **never** include a song already in that seed playlist either — even if it isn't liked.
+- Recommendations must **never** include a song already in Liked Music (playlist ID `LM`) **or already in ANY of the user's other playlists** — not just the one seeded from. (Originally scoped to Liked Music + seed playlist only; broadened after user feedback found songs already sitting in an unrelated playlist coming back as "new" recommendations, which defeats the point.)
+- When seeded by a playlist, recommendations must **never** include a song already in that seed playlist either — even if it isn't liked. (Subsumed by the rule above for playlists in the user's library listing, but kept as an explicit belt-and-suspenders exclusion in `recommend_from_playlist` in case the seed playlist isn't one `get_library_playlists()` returns.)
+- `recommend_from_song` must never return the seed song itself.
 - v1 excludes BPM/tempo comparison entirely. YouTube Music exposes no tempo data. Revisit as a v2 stretch goal (needs a 3rd-party BPM source, e.g. GetSongBPM or AcousticBrainz — expect real coverage gaps).
 
 ## Why not just call YouTube's radio API directly
@@ -52,8 +53,8 @@ No ML needed for v1 — simple, explainable scoring:
 
 ## Exclusion filter (applied last, always)
 
-- Pull the full Liked Music list once per call — `get_playlist("LM", limit=None)` (**not** `get_liked_songs()`, which defaults to only the most recent 100 — not nearly enough for a library this size). Build a videoId set, filter out any candidate in it.
-- For playlist-seeded calls, also pull the seed playlist's own full track list and filter those out too.
+- `_library_video_ids()` builds the full exclusion set: Liked Music (`get_playlist("LM", limit=None)` — **not** `get_liked_songs()`, which defaults to only the most recent 100, not nearly enough for a library this size) **unioned with every track in every playlist** `get_library_playlists(limit=None)` lists (each fetched via `get_playlist(id, limit=None)`; a playlist that fails to fetch is skipped rather than failing the whole call, same partial-results philosophy as signal gathering). Used by all three tools (`recommend_from_song`, `recommend_from_playlist`, `songs_by_artist`).
+- For playlist-seeded calls, the seed playlist's own track list is unioned in explicitly too, as a belt-and-suspenders exclusion in case that playlist isn't one `get_library_playlists()` happens to return.
 - Dedupe candidates against each other (same videoId surfaced by multiple sources/seeds → one entry, sources unioned, score summed).
 
 ## Tools (v1)

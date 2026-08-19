@@ -274,13 +274,14 @@ def recommend_from_song(video_id: str, limit: int = 20) -> list[dict[str, Any]]:
 
     Combines YouTube Music's radio, its separate "related" signal, and the
     seed artist's own catalog plus related artists' catalogs, then ranks by
-    how many independent signals agreed on each candidate. Never returns a
-    song already in Liked Music.
+    how many independent signals agreed on each candidate. Never returns the
+    seed song itself, and never returns a song already in Liked Music or in
+    ANY of the user's playlists.
     """
     yt = _client()
     candidates = _gather_seed_candidates(yt, video_id)
     merged = _merge_and_score([candidates])
-    exclude = _liked_video_ids(yt)
+    exclude = _library_video_ids(yt)
     return _finalize(merged, exclude, limit)
 
 
@@ -292,8 +293,8 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     Randomly samples up to seed_sample_size tracks from the playlist as seeds
     (the whole playlist if it's smaller), runs the same multi-signal
     candidate generation as recommend_from_song for each, and pools/ranks the
-    results. Never returns a song already in Liked Music OR already in the
-    source playlist.
+    results. Never returns a song already in Liked Music, already in the
+    source playlist, or already in ANY other of the user's playlists.
     """
     yt = _client()
     playlist = yt.get_playlist(playlist_id, limit=None)
@@ -306,7 +307,7 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     per_seed = [_gather_seed_candidates(yt, t["videoId"]) for t in sample]
     merged = _merge_and_score(per_seed)
 
-    exclude = _liked_video_ids(yt) | {t["videoId"] for t in tracks}
+    exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
     return _finalize(merged, exclude, limit)
 
 

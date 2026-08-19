@@ -581,6 +581,32 @@ def test_recommend_from_song_excludes_liked(monkeypatch):
     assert seed not in ids
 
 
+def test_recommend_from_song_excludes_songs_in_any_playlist_not_just_liked(monkeypatch):
+    seed = "seed1"
+    watch = {
+        seed: {
+            "tracks": [
+                {"videoId": seed, "title": "Seed"},
+                {"videoId": "cand1", "title": "Candidate 1", "artists": [{"name": "A"}]},
+                {"videoId": "inplaylist1", "title": "Already In A Playlist", "artists": [{"name": "B"}]},
+            ],
+            "related": None,
+        }
+    }
+    yt = _FakeYT(
+        watch=watch,
+        playlists={"LM": {"tracks": []}, "PL1": {"tracks": [{"videoId": "inplaylist1"}]}},
+        library_playlists=[{"playlistId": "PL1"}],
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    results = recommend_from_song(seed, limit=20)
+
+    ids = [r["videoId"] for r in results]
+    assert "cand1" in ids
+    assert "inplaylist1" not in ids
+
+
 def test_recommend_from_playlist_excludes_seed_playlist_and_liked(monkeypatch):
     tracks = [{"videoId": "t1"}, {"videoId": "t2"}]
     watch = {
@@ -597,6 +623,35 @@ def test_recommend_from_playlist_excludes_seed_playlist_and_liked(monkeypatch):
 
     ids = {r["videoId"] for r in results}
     assert ids == {"cand1"}  # t1/t2 excluded as seed-playlist members, seeds sampled == full playlist here
+
+
+def test_recommend_from_playlist_excludes_songs_in_other_playlists(monkeypatch):
+    tracks = [{"videoId": "t1"}]
+    watch = {
+        "t1": {
+            "tracks": [
+                {"videoId": "t1"},
+                {"videoId": "cand1", "title": "C1", "artists": []},
+                {"videoId": "otherplaylist1", "title": "In Another Playlist", "artists": []},
+            ],
+            "related": None,
+        }
+    }
+    yt = _FakeYT(
+        watch=watch,
+        playlists={
+            "PL1": {"tracks": tracks},
+            "LM": {"tracks": []},
+            "PL2": {"tracks": [{"videoId": "otherplaylist1"}]},
+        },
+        library_playlists=[{"playlistId": "PL1"}, {"playlistId": "PL2"}],
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    results = recommend_from_playlist("PL1", limit=20, seed_sample_size=5)
+
+    ids = {r["videoId"] for r in results}
+    assert ids == {"cand1"}
 
 
 def test_recommend_from_playlist_empty_playlist_returns_empty(monkeypatch):
