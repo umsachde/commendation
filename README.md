@@ -71,12 +71,20 @@ For other MCP clients (Claude Desktop, etc.), point them at the same command and
 
 ## Testing
 
-Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, error translation, and both tools end-to-end — against a hand-rolled fake YTMusic client. No network access or `headers_auth.json` required.
+Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, artist/song search resolution, error translation, and all three tools end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake YTMusic client. No network access or `headers_auth.json` required.
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
+
+Check coverage with:
+
+```bash
+pytest --cov=server --cov-report=term-missing
+```
+
+`server.py` is at 98% line coverage; the two lines that remain uncovered are `_client()`'s real `YTMusic()` construction and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live auth session or actually running the server as a process.
 
 `scripts/test_recommend.py` is a separate, complementary smoke test that hits your real account (see Setup step 2) to sanity-check that auth and live recommendations actually work.
 

@@ -63,8 +63,8 @@ No ML needed for v1 — simple, explainable scoring:
   — `video_id` and `song`/`artist` are alternative ways to specify the seed; exactly one path must be given.
   When `song` is given instead of `video_id`, it's resolved to a videoId internally via `search(filter="songs")`
   (`_resolve_song_video_id`), preferring a result whose artist credit loosely matches `artist` if given, else the
-  top search hit. Resolves the "recommend_from_song accept a search query" open question below — user asked for
-  "10 songs that relate to this song by this artist" to work without a separate lookup call first. Raises a clear
+  top search hit. Added because the user asked for "10 songs that relate to this song by this artist" to work
+  without a separate lookup call first (previously an open question in this doc). Raises a clear
   `RuntimeError` if neither `video_id` nor `song` is given, or if `song`/`artist` matches nothing.
 - `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5) -> list[{...}]`
 - `songs_by_artist(artist, limit=10) -> {artist, requested, found, songs: [{videoId, title, artists, album}]}`
@@ -118,3 +118,11 @@ Not started. Open design questions for whichever agent picks this up:
 - Found and fixed a real bug this way: `handle_errors` caught `YTMusicServerError` before `YTMusicGatedError`, and since the latter subclasses the former, the gated-content branch was dead code — gated errors always fell through to the generic "server error" message instead of the clearer gated-specific one. Reordered the `except` clauses (subclass before superclass) to fix.
 
 **Aside (does not affect commendation, but happened during this build):** a `remove_from_playlist` tool was added to the separate `ytmusic-mcp` project to clean up a duplicate-track bug found in a "C - Country" playlist while smoke-testing `recommend_from_playlist` against real data. That's `ytmusic-mcp` maintenance, unrelated to commendation's own scope — mentioned here only so a future agent doesn't wonder why an unrelated commit landed mid-build.
+
+**2026-08-19 session — three follow-up features/fixes driven directly by user feedback, each committed separately:**
+- Added `songs_by_artist` — see its writeup under Tools (v1) above. New helpers: `_library_video_ids`, `_resolve_artist`, `_artist_song_catalog`.
+- Fixed a real exclusion bug: `recommend_from_song`/`recommend_from_playlist` only ever filtered against Liked Music (+ seed playlist for the latter) — a song already sitting in some *other* playlist could still come back as a "new" recommendation. Both now use `_library_video_ids` (the helper built for `songs_by_artist`), so all three tools share one exclusion definition. Verified against the real account before and after (same seed produced overlapping results pre-fix, zero overlap post-fix).
+- Added seed-by-search to `recommend_from_song` (`song`/`artist` params, new `_resolve_song_video_id` helper) — resolves the "accept a search query" open question that used to be listed below.
+- Test suite grew from 34 → 57 tests alongside these changes (one test per new code path, not just happy-path coverage — signal-failure branches, shortfall/no-match/validation-error cases, and the belt-and-suspenders seed-playlist exclusion are all explicitly covered). Also closed 3 pre-existing gaps in `_gather_seed_candidates` (seed-artist lookup failure, a related-artist with no browseId, a related-artist lookup failure) found while auditing coverage.
+- `pytest-cov` added as a dev dependency; `server.py` line coverage is 98% (220 statements, 4 missed — `_client()`'s real YTMusic() construction and the `if __name__ == "__main__"` entrypoint, neither meaningfully unit-testable without a live auth session / actually running the server as a process). Run `pytest --cov=server --cov-report=term-missing` to reproduce.
+- README and this file were updated in the same commits as each change — no doc lagging behind code at end of session.

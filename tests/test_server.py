@@ -453,6 +453,69 @@ def test_gather_seed_candidates_excludes_seed_from_radio_tracks():
     assert _gather_seed_candidates(yt, seed) == {}
 
 
+def test_gather_seed_candidates_seed_artist_lookup_fails_radio_still_returned():
+    seed = "seed1"
+    watch = {
+        seed: {
+            "tracks": [
+                {"videoId": seed, "title": "Seed", "artists": [{"name": "A", "id": "artist1"}]},
+                {"videoId": "radio1", "title": "Radio Song"},
+            ],
+            "related": None,
+        }
+    }
+    yt = _FakeYT(watch=watch, artists={"artist1": YTMusicError("artist page down")})
+
+    found = _gather_seed_candidates(yt, seed)
+
+    assert found["radio1"]["sources"] == {"radio"}
+    assert "artistsong1" not in found
+
+
+def test_gather_seed_candidates_related_artist_without_browse_id_is_skipped():
+    seed = "seed1"
+    watch = {
+        seed: {
+            "tracks": [{"videoId": seed, "title": "Seed", "artists": [{"name": "A", "id": "artist1"}]}],
+            "related": None,
+        }
+    }
+    artists = {
+        "artist1": {
+            "songs": {"results": [{"videoId": "artistsong1", "title": "Artist Song"}]},
+            "related": {"results": [{"title": "No Browse Id"}]},  # missing "browseId"
+        }
+    }
+    yt = _FakeYT(watch=watch, artists=artists)
+
+    found = _gather_seed_candidates(yt, seed)
+
+    assert "artistsong1" in found
+    assert yt.get_artist_calls == ["artist1"]  # never tried to expand the browseId-less related artist
+
+
+def test_gather_seed_candidates_related_artist_lookup_failure_is_skipped():
+    seed = "seed1"
+    watch = {
+        seed: {
+            "tracks": [{"videoId": seed, "title": "Seed", "artists": [{"name": "A", "id": "artist1"}]}],
+            "related": None,
+        }
+    }
+    artists = {
+        "artist1": {
+            "songs": {"results": [{"videoId": "artistsong1", "title": "Artist Song"}]},
+            "related": {"results": [{"browseId": "relartist1"}]},
+        },
+        "relartist1": YTMusicError("related artist page down"),
+    }
+    yt = _FakeYT(watch=watch, artists=artists)
+
+    found = _gather_seed_candidates(yt, seed)
+
+    assert "artistsong1" in found  # seed artist's own songs still surfaced despite the related-artist failure
+
+
 # --- handle_errors -------------------------------------------------------
 
 
