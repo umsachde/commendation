@@ -500,3 +500,71 @@ Re-measure with `python scripts/label_library.py --report` once the crawl finish
 - **Anchor vectors are hand-authored first drafts.** They have not been tuned against real listening.
 - **No implicit feedback yet.** Diffing past recommendations against later history is the highest-value
   remaining piece, because it costs the user nothing.
+
+---
+
+## Measured results (2026-08-19, crawl complete)
+
+The atlas crawl finished: **1,592 playlist-mood listings, 65,438 unique tracks, 104,028 memberships.**
+
+### Library coverage: 71.3%
+
+Well above the 30-60% predicted earlier in this document.
+
+| Source | Songs |
+| --- | --- |
+| `artist` (propagated) | 553 |
+| `atlas` (playlist membership) | 480 |
+| **Total labelled** | **1,033 of 1,449** |
+
+Artist propagation is still the single largest contributor, and it needs no API key. It was added as a
+hedge against the LLM layer being unavailable and turned out to be structural.
+
+### Recommendation quality
+
+Measured with `scripts/quality_check.py` over 8 mood/arc cases.
+
+| | Baseline (47% crawl, raw-fit seeds) | Full data, raw-fit seeds | **Final** |
+| --- | --- | --- | --- |
+| Library coverage | 59.1% | 71.3% | 71.3% |
+| Mean mood fit | 0.775 | 0.805 | **0.848** |
+| **Cross-mood overlap** | **0.307** | 0.089 | **0.064** |
+| Distinct songs / 80 slots | 44 | 61 | **63** |
+| Picks carrying a mood label | 100% | 100% | 94% |
+
+**Mean fit was a misleading headline metric.** The baseline scored a healthy 0.775 while returning 70% the
+same songs for "heartbroken" and "angry" — the whole engine had only 44 distinct songs to offer across 8
+moods. Cross-mood overlap is the metric that exposes that, and it is now the one to watch.
+
+**Credit where it belongs: the data fix did most of the work.** Overlap fell 0.307 → 0.089 from the
+completed crawl and the (playlist, mood) dedupe fix alone, then 0.089 → 0.064 from distinctiveness
+scoring. The seed-scoring change is real but secondary — worth recording, because the seed lists made it
+look like the whole story. Note the middle column is not a perfect reconstruction of the original scoring:
+it disables the distinctiveness term but keeps the softened confidence weighting, which shipped together.
+
+### What the results actually look like
+
+Same four moods that used to return near-identical mainstream pop:
+
+```
+heartbroken   Sunn Raha Hai · Ae Dil Hai Mushkil · Tere Bina · Beete Lamhein
+focus         The Sound of Silence · Vincent · Sultans Of Swing · Dream On
+angry         Thunderstruck · Back In Black · Welcome To The Jungle · Rumble
+party         Brown Munde · Karan Aujla · Diljit Dosanjh · Dil Luteya
+```
+
+The Punjabi and Bollywood catalogue that the coverage probe worried about is now surfacing strongly — the
+gap had two halves, and only one was missing labels. The other was scoring: those songs are distinctive
+rather than central, so raw fit had systematically buried them even when labelled.
+
+### Caveats on these numbers
+
+- **`angry` scores lowest (0.659) but its songs are among the best.** YouTube's mood taxonomy has no
+  aggressive category, so there is no anchor near high-tension/low-valence and even correct picks score
+  moderately. The fit metric under-reports this mood; don't tune against it naively.
+- **`Workout/hold` and `angry/mirror` still share 40%.** Both are high-energy/high-tension and the library
+  has almost no genuinely aggressive labelled material to separate them.
+- **`heartbroken/mirror` vs `heartbroken/lift` share 50% — that is correct**, not a defect. Same mood,
+  different arc, same candidate pool; the arc changes the ordering and the destination.
+- **Rated fell 100% → 94%.** Distinctive seeds reach into catalogue the atlas never covered, so some picks
+  now rank on signal agreement alone. That is the right trade, and the response says so.

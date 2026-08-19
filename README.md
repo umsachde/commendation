@@ -78,13 +78,30 @@ cheapest first, and the best available source for a song wins outright:
 | --- | --- | --- |
 | `llm` | Claude reads the lyrics. Handles any language, and irony. | Optional — `pip install -e ".[llm]"` |
 | `lyrics` | Lyrics fetched and cached (2 API calls/song, incl. the negative result) | — |
-| `atlas` | Membership in YouTube's own mood playlists — 2,223 of them across 11 placeable moods | A crawl |
+| `atlas` | Membership in YouTube's own mood playlists — 1,592 listings, 65,438 tracks, 104,028 memberships | A crawl |
 | `artist` | An artist's average mood, propagated to their unlabelled songs | Free |
 
 **The atlas alone is not enough, and measurably so.** On this account a 60-playlist sample covered 4.1% of
 the liked library, and the misses concentrate on the Punjabi, Bollywood and Reggae catalogue that
 YouTube's English-centric mood playlists barely touch. Artist propagation is what closes most of that gap
 without any API key; the Claude layer closes the rest.
+
+After a full crawl, measured: **71.3% library coverage** — 553 songs from artist propagation, 480 from
+playlist membership.
+
+### Measuring quality
+
+`scripts/quality_check.py` scores a fixed set of mood/arc cases so changes can be judged by number rather
+than impression:
+
+```bash
+python scripts/quality_check.py --titles
+python scripts/quality_check.py --distinctiveness 0   # A/B the seed scoring
+```
+
+Watch **cross-mood overlap**, not just mean fit. An early build scored a healthy 0.775 mean fit while
+returning 70% the same songs for "heartbroken" and "angry"; fit alone couldn't see it. Current numbers:
+mean fit 0.848, cross-mood overlap 0.064, 63 distinct songs across 80 slots.
 
 ### Setup
 
