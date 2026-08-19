@@ -184,4 +184,33 @@ def _finalize(merged: dict[str, dict[str, Any]], exclude: set[str], limit: int) 
         for c in ranked[:limit]
     ]
 
+def same_song(title_a: str | None, artist_a: str | None, title_b: str | None, artist_b: str | None) -> bool:
+    """Whether two credits are the same song under different uploads.
 
+    Excluding the seed by videoId isn't enough: YouTube carries the same track
+    many times over (topic channels, remasters, "(Official Video)"), so a seed
+    resolved by search can come straight back under a different id. Observed
+    live -- seeding on "Kryptonite" returned Kryptonite.
+    """
+    if not title_a or not title_b:
+        return False
+    if _song_key(title_a) != _song_key(title_b):
+        return False
+    if not artist_a or not artist_b:
+        return True
+    a, b = artist_a.lower(), artist_b.lower()
+    return a in b or b in a
+
+
+def _song_key(title: str) -> str:
+    """Normalise a title: drop bracketed qualifiers, punctuation and case."""
+    lowered = title.lower()
+    for opener, closer in (("(", ")"), ("[", "]")):
+        while opener in lowered and closer in lowered[lowered.index(opener):]:
+            start = lowered.index(opener)
+            end = lowered.index(closer, start)
+            lowered = (lowered[:start] + " " + lowered[end + 1:]).strip()
+    for marker in (" - ", " feat.", " ft.", " with "):
+        if marker in lowered:
+            lowered = lowered.split(marker)[0]
+    return "".join(ch for ch in lowered if ch.isalnum())

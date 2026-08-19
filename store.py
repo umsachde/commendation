@@ -129,6 +129,27 @@ CREATE TABLE IF NOT EXISTS feedback (
     at       REAL
 );
 
+-- Tempo from Deezer. Negative results are recorded too: Deezer genuinely has
+-- no BPM for much of the non-English catalogue, and rediscovering that costs
+-- two requests per song per pass. Deliberately NOT propagated by artist --
+-- an artist's songs share a sensibility, not a tempo.
+CREATE TABLE IF NOT EXISTS track_tempo (
+    video_id    TEXT PRIMARY KEY,
+    bpm         REAL,
+    status      TEXT,
+    deezer_id   INTEGER,
+    resolved_at REAL
+);
+
+-- Genre labels harvested from YouTube's genre-category pages. Feeds language
+-- inference; see taxonomy.py.
+CREATE TABLE IF NOT EXISTS genre_membership (
+    video_id TEXT NOT NULL,
+    genre    TEXT NOT NULL,
+    PRIMARY KEY (video_id, genre)
+);
+CREATE INDEX IF NOT EXISTS idx_genre_video ON genre_membership (video_id);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -546,4 +567,93 @@ def rejected_video_ids(conn: sqlite3.Connection) -> set[str]:
         for r in conn.execute(
             "SELECT DISTINCT video_id FROM feedback WHERE reaction IN ('skipped', 'wrong_mood')"
         )
+    }
+
+
+# --- tempo ------------------------------------------------------------------
+
+
+def put_tempo(
+    conn: sqlite3.Connection,
+    video_id: str,
+    bpm: float | None,
+    status: str,
+    deezer_id: int | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO track_tempo (video_id, bpm, status, deezer_id, resolved_at) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(video_id) DO UPDATE SET "
+        "  bpm = excluded.bpm, status = excluded.status, "
+        "  deezer_id = excluded.deezer_id, resolved_at = excluded.resolved_at",
+        (video_id, bpm, status, deezer_id, time.time()),
+    )
+    conn.commit()
+
+
+def get_tempo(conn: sqlite3.Connection, video_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM track_tempo WHERE video_id = ?", (video_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_tempos(conn: sqlite3.Connection, video_ids: Iterable[str]) -> dict[str, float]:
+    """Known tempos only -- ids absent from the result have no usable BPM."""
+    ids = [v for v in dict.fromkeys(video_ids) if v]
+    found: dict[str, float] = {}
+    for start in range(0, len(ids), 900):
+        window = ids[start : start + 900]
+        placeholders = ",".join("?" * len(window))
+        for row in conn.execute(
+            f"SELECT video_id, bpm FROM track_tempo WHERE bpm IS NOT NULL AND video_id IN ({placeholders})",
+            window,
+        ):
+            found[row["video_id"]] = row["bpm"]
+    return found
+
+
+def tempo_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM track_tempo GROUP BY status"
+    ).fetchall()
+    by_status = {r["status"]: r["n"] for r in rows}
+    attempted = sum(by_status.values())
+    return {
+        "attempted": attempted,
+        "with_bpm": by_status.get("ok", 0),
+        "coverage": round(by_status.get("ok", 0) / attempted, 4) if attempted else 0.0,
+        "by_status": by_status,
+    }
+
+
+# --- genre ------------------------------------------------------------------
+
+
+def record_genre(conn: sqlite3.Connection, genre: str, video_ids: Iterable[str]) -> int:
+    rows = [(v, genre) for v in video_ids if v]
+    if not rows:
+        return 0
+    with conn:
+        conn.executemany(
+            "INSERT INTO genre_membership (video_id, genre) VALUES (?, ?) "
+            "ON CONFLICT(video_id, genre) DO NOTHING",
+            rows,
+        )
+    return len(rows)
+
+
+def genres_for(conn: sqlite3.Connection, video_id: str) -> dict[str, int]:
+    return {
+        r["genre"]: 1
+        for r in conn.execute("SELECT genre FROM genre_membership WHERE video_id = ?", (video_id,))
+    }
+
+
+def genre_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    return {
+        "tracks": conn.execute("SELECT COUNT(DISTINCT video_id) AS n FROM genre_membership").fetchone()["n"],
+        "genres": {
+            r["genre"]: r["n"]
+            for r in conn.execute(
+                "SELECT genre, COUNT(*) AS n FROM genre_membership GROUP BY genre ORDER BY n DESC"
+            )
+        },
     }

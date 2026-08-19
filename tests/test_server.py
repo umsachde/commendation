@@ -678,7 +678,7 @@ def test_recommend_from_song_resolves_seed_from_song_and_artist(monkeypatch):
 
     results = recommend_from_song(song="Kryptonite", artist="3 Doors Down", limit=20)
 
-    assert [r["videoId"] for r in results] == ["cand1"]
+    assert [r["videoId"] for r in results["songs"]] == ["cand1"]
 
 
 def test_recommend_from_song_no_match_raises(monkeypatch):
@@ -714,7 +714,7 @@ def test_recommend_from_song_excludes_liked(monkeypatch):
 
     results = recommend_from_song(seed, limit=20)
 
-    ids = [r["videoId"] for r in results]
+    ids = [r["videoId"] for r in results["songs"]]
     assert "cand1" in ids
     assert "liked1" not in ids
     assert seed not in ids
@@ -741,7 +741,7 @@ def test_recommend_from_song_excludes_songs_in_any_playlist_not_just_liked(monke
 
     results = recommend_from_song(seed, limit=20)
 
-    ids = [r["videoId"] for r in results]
+    ids = [r["videoId"] for r in results["songs"]]
     assert "cand1" in ids
     assert "inplaylist1" not in ids
 
@@ -768,7 +768,7 @@ def test_recommend_from_song_same_artist_only_filters_other_artists(monkeypatch)
 
     results = recommend_from_song(seed, limit=20, same_artist_only=True)
 
-    ids = [r["videoId"] for r in results]
+    ids = [r["videoId"] for r in results["songs"]]
     assert ids == ["lf1"]
     assert "other1" not in ids
 
@@ -795,7 +795,7 @@ def test_recommend_from_song_same_artist_only_uses_artist_param_when_seed_lookup
 
     results = recommend_from_song(song="Kryptonite", artist="3 Doors Down", limit=20, same_artist_only=True)
 
-    assert [r["videoId"] for r in results] == ["cand1"]
+    assert [r["videoId"] for r in results["songs"]] == ["cand1"]
 
 
 def test_recommend_from_song_same_artist_only_false_by_default(monkeypatch):
@@ -814,7 +814,7 @@ def test_recommend_from_song_same_artist_only_false_by_default(monkeypatch):
 
     results = recommend_from_song(seed, limit=20)
 
-    assert [r["videoId"] for r in results] == ["other1"]
+    assert [r["videoId"] for r in results["songs"]] == ["other1"]
 
 
 def test_recommend_from_playlist_excludes_seed_playlist_and_liked(monkeypatch):

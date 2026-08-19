@@ -10,11 +10,11 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 
 | Tool | Description |
 | --- | --- |
-| `recommend_from_song(video_id=None, song=None, artist=None, limit=20)` | Recommend new songs similar to a seed song. Pass `video_id` directly, or `song` (optionally with `artist`) to have the seed resolved via search — e.g. "songs that relate to Kryptonite by 3 Doors Down" needs no separate lookup first. |
+| `recommend_from_song(video_id=None, song=None, artist=None, limit=20, language=None, match_seed_tempo=False, ...)` | Recommend new songs similar to a seed song. Pass `video_id` directly, or `song` (optionally with `artist`). Supports [language](#language-filtering) and [tempo](#tempo-bpm) filters. Returns `{"songs": [...], "notes": [...], "filters": {...}}`. |
 | `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5)` | Recommend new songs based on an entire playlist (samples seed tracks from it). |
 | `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
 | `refresh_library()` | Force-rebuild the cached library exclusion set. See [Library cache](#library-cache). |
-| `recommend_for_mood(feeling=None, vector=None, context=None, arc="mirror", limit=20, genres=None)` | **v2.** Recommend new songs matching how you actually feel, shaped into a sequence that moves. See [Mood](#mood-aware-recommendations-v2). |
+| `recommend_for_mood(feeling=None, vector=None, context=None, arc="mirror", limit=20, genres=None, language=None, bpm=None, ...)` | **v2.** Recommend new songs matching how you actually feel, shaped into a sequence that moves. See [Mood](#mood-aware-recommendations-v2). |
 | `read_my_mood()` | **v2.** Infer your current mood from recent listening, *with the evidence for it*. |
 | `explain_recommendation(video_id)` | **v2.** Why a song was picked, in mood terms. |
 | `record_feedback(video_id, reaction)` | **v2.** `loved` / `saved` / `skipped` / `wrong_mood`. Rejections are never recommended again. |
@@ -112,7 +112,13 @@ python scripts/build_atlas.py
 # 2. Label your library (steps 1-3 need no credentials beyond YouTube Music)
 python scripts/label_library.py
 
-# 3. Optional: read lyrics with Claude to cover what the atlas missed
+# 3. Genre/language labels, for the language filter (~10-15 min)
+python scripts/build_genres.py
+
+# 4. Tempo, for BPM filtering (~0.4s per song)
+python scripts/build_tempo.py
+
+# 5. Optional: read lyrics with Claude to cover what the atlas missed
 pip install -e ".[llm]" && ant auth login
 python scripts/label_library.py --claude
 ```
@@ -138,6 +144,70 @@ local timestamps are the only clock this system will ever have:
 
 Everything mood-related is stored in local SQLite. The only thing that ever leaves the machine is,
 optionally, song titles and lyric excerpts sent to the Claude API for labelling.
+
+## Language filtering
+
+*"Find songs like this Punjabi track, but only English ones."*
+
+```python
+recommend_from_song(song="Brown Munde", artist="AP Dhillon", language=["english"])
+recommend_for_mood(feeling="hyped", exclude_languages=["punjabi", "hindi"])
+```
+
+Nothing in the YouTube Music API returns a language, so it's assembled in layers,
+strongest first:
+
+| Layer | Evidence | Weight |
+| --- | --- | --- |
+| `script` | Title written in Gurmukhi, Devanagari, Arabic, Hangul, Kana or Han | 100 |
+| `library` | Your own playlist names (matched loosely — `Punjabu` counts) | 50 |
+| `genre` | YouTube's genre-category pages | 10 |
+| `genre` (English) | The same, but for anglophone genres | **1** |
+
+**English is weighted at 1 on purpose.** YouTube files Punjabi and Hindi rap under
+"Hip-hop", so counting an English-genre hit as a normal vote labelled Sidhu Moose Wala,
+Karan Aujla and AP Dhillon as English. English is now what you get when *no*
+language-bearing evidence exists, rather than something that can outvote real evidence.
+
+Two behaviours worth knowing:
+
+- **Unlabelled candidates are dropped by default.** Asking for English only is a request
+  for a guarantee, and an unlabelled candidate from a Punjabi-seeded pool is probably
+  Punjabi. The response always reports how many were dropped;
+  `allow_unlabelled_language=True` keeps them.
+- **Filtering alone isn't enough, so retrieval expands.** Seeding from a Punjabi song and
+  filtering for English left 3 results out of 8 — the pool simply didn't contain more. The
+  surviving songs are re-seeded to reach further into that language, and the response says
+  when that happened. `expand_across_language=False` disables it.
+
+This infers *language* from *genre*, which is approximate — "Dance & electronic" is often
+instrumental, and "Reggae & caribbean" is usually English. Treat it as a strong hint.
+
+## Tempo (BPM)
+
+YouTube Music exposes no tempo data, so BPM comes from Deezer's public API — no key, no
+auth, no attribution required.
+
+```python
+recommend_from_song(song="Kryptonite", artist="3 Doors Down", match_seed_tempo=True)
+recommend_for_mood(context="Workout", bpm_min=120, bpm_max=140)
+```
+
+- `bpm` biases ranking toward a tempo; `bpm_min`/`bpm_max` bound it hard.
+- `match_seed_tempo=True` uses the seed song's own BPM.
+- **Half- and double-time count as close.** 170bpm drum-and-bass and 85bpm hip-hop share a
+  pulse; treating them as opposites would be musically wrong.
+- Tempo is **never propagated by artist**, unlike mood — an artist's songs share a
+  sensibility, not a BPM. Propagating it would be inventing data.
+
+**Coverage is uneven and the response says so.** Measured on this library: 6/6 on Pop, 4/6
+on Rock and Reggae, 1/6 on Punjabi and Bollywood. The misses are genuine — the songs are on
+Deezer with `bpm: 0`, verified by checking that matching succeeded and deeper result scans
+find nothing. So **a song with unknown BPM is never dropped**, only left unscored on tempo;
+dropping them would quietly delete whole languages from the results.
+
+Build the index with `python scripts/build_tempo.py` (~0.4s/song, cached permanently
+including the misses).
 
 ## Library cache
 

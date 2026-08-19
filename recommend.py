@@ -15,6 +15,7 @@ into a sequence that moves (see arc.py).
 from typing import Any, Iterable
 
 import arc as arc_module
+import filters
 import label
 import moodspace
 import sense
@@ -236,6 +237,113 @@ def _library_artists(conn: Any) -> set[str]:
     }
 
 
+def bridge_expand(
+    yt: Any,
+    conn: Any,
+    survivors: list[dict[str, Any]],
+    exclude: set[str],
+    want: Iterable[str] | None,
+    exclude_languages: Iterable[str] | None,
+    allow_unlabelled: bool,
+    needed: int,
+    max_bridges: int = 3,
+    hops: int = 1,
+) -> tuple[list[dict[str, Any]], int]:
+    """Grow a language-filtered result by re-seeding from the songs that passed.
+
+    Filtering a pool for a language the seed isn't in can only ever return the
+    few matching songs that happened to be there -- seeding from a Punjabi
+    track and asking for English left 3 results out of 8 requested. The fix is
+    the same one the mood engine needed: change retrieval, don't just filter.
+
+    The survivors are English songs already established as similar to the seed,
+    so radio from them reaches more English songs in the same neighbourhood.
+    One hop by default, because each is another round of API calls and the
+    results drift further from the original seed with every jump.
+    """
+    import filters
+
+    if not survivors or len(survivors) >= needed:
+        return survivors, 0
+
+    found = {s["videoId"]: s for s in survivors}
+    added = 0
+
+    for _ in range(hops):
+        if len(found) >= needed:
+            break
+        bridges = sorted(found.values(), key=lambda c: -c.get("base_score", 0))[:max_bridges]
+
+        per_seed = []
+        for bridge in bridges:
+            try:
+                per_seed.append(signals._gather_seed_candidates(yt, bridge["videoId"]))
+            except Exception:  # noqa: BLE001 - a dead bridge shouldn't sink the expansion
+                continue
+        if not per_seed:
+            break
+
+        merged = signals._merge_and_score(per_seed)
+        fresh = [
+            {
+                "videoId": vid, "title": c["title"], "artists": c["artists"],
+                "album": c.get("album"), "sources": sorted(c["sources"]),
+                "score": c["score"], "base_score": c["score"],
+            }
+            for vid, c in merged.items()
+            if vid not in exclude and vid not in found
+        ]
+
+        kept, _ = filters.apply_language(
+            conn, fresh, want=want, exclude=exclude_languages, allow_unlabelled=allow_unlabelled
+        )
+        for candidate in kept:
+            if candidate["videoId"] not in found:
+                found[candidate["videoId"]] = candidate
+                added += 1
+
+    return list(found.values()), added
+
+
+def _language_note(report: dict[str, Any], limit: int) -> str:
+    """Say plainly what a language filter removed. Dropping songs for lack of a
+    label is a real cost and must not be invisible."""
+    wanted = ", ".join(report["want"] or []) or f"not {', '.join(report['exclude'] or [])}"
+    parts = [f"Language filter ({wanted}): kept {report['kept']}"]
+    if report["dropped_wrong_language"]:
+        parts.append(f"dropped {report['dropped_wrong_language']} in other languages")
+    if report["dropped_unlabelled"]:
+        parts.append(
+            f"dropped {report['dropped_unlabelled']} with no language label "
+            "(pass allow_unlabelled_language=True to keep them)"
+        )
+    note = "; ".join(parts) + "."
+    if report["kept"] < limit:
+        note += (
+            f" That leaves fewer than the {limit} requested — run scripts/build_genres.py "
+            "to label more artists."
+        )
+    return note
+
+
+def _tempo_note(report: dict[str, Any]) -> str:
+    parts = []
+    if report["target_bpm"]:
+        parts.append(f"Tempo target {report['target_bpm']:.0f}bpm")
+    if report["range"]:
+        low, high = report["range"]
+        parts.append(f"Tempo range {low or '-'}-{high or '-'}bpm")
+    parts.append(f"{report['with_known_tempo']} candidates had a known BPM")
+    if report["dropped_out_of_range"]:
+        parts.append(f"{report['dropped_out_of_range']} dropped as out of range")
+    if report["unknown_tempo_kept"]:
+        parts.append(
+            f"{report['unknown_tempo_kept']} kept with unknown BPM (Deezer has no tempo for "
+            "much of the non-English catalogue, so these are not dropped)"
+        )
+    return "; ".join(parts) + "."
+
+
 def build(
     yt: Any,
     conn: Any,
@@ -246,6 +354,12 @@ def build(
     arc: str = "mirror",
     limit: int = 20,
     genres: Iterable[str] | None = None,
+    language: Iterable[str] | None = None,
+    exclude_languages: Iterable[str] | None = None,
+    allow_unlabelled_language: bool = False,
+    bpm: float | None = None,
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
     use_history: bool = True,
 ) -> dict[str, Any]:
     """Produce a mood-shaped, ordered set of new songs."""
@@ -286,7 +400,9 @@ def build(
             "target": {k: round(v, 3) for k, v in target.items()},
             "target_origin": resolved["origin"],
             "described": moodspace.describe(target),
-            "arc": arc, "seeds": seeds, "notes": notes + ["No candidates survived the library exclusion."],
+            "arc": arc, "seeds": seeds,
+            "notes": notes + ["No candidates survived the library exclusion."],
+            "filters": {"language": {"applied": False}, "tempo": {"applied": False}},
             "songs": [],
         }
 
@@ -318,6 +434,20 @@ def build(
     candidates.sort(key=lambda c: -c["base_score"])
     shortlist = candidates[: max(limit * CANDIDATES_PER_SLOT, 200)]
 
+    shortlist, language_report = filters.apply_language(
+        conn, shortlist, want=language, exclude=exclude_languages,
+        allow_unlabelled=allow_unlabelled_language,
+    )
+    if language_report["applied"]:
+        notes.append(_language_note(language_report, limit))
+
+    shortlist, tempo_report = filters.apply_tempo(
+        conn, shortlist, target_bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max
+    )
+    if tempo_report["applied"]:
+        notes.append(_tempo_note(tempo_report))
+    shortlist.sort(key=lambda c: -c["base_score"])
+
     slot_targets = arc_module.targets(target, arc, limit)
     ordered = arc_module.sequence(shortlist, slot_targets)
 
@@ -343,5 +473,6 @@ def build(
             for s in seeds
         ],
         "notes": notes,
+        "filters": {"language": language_report, "tempo": tempo_report},
         "songs": ordered,
     }

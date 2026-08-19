@@ -1134,3 +1134,158 @@ def test_pick_seeds_ranks_by_distinctiveness_not_raw_fit(db):
     ])
     seeds = recommend.pick_seeds(db, ms.ANCHORS["Sad"], count=2)
     assert seeds[0]["videoId"] == "distinct"
+
+
+# --- seed re-upload exclusion ----------------------------------------------
+
+
+def test_same_song_matches_re_uploads():
+    import signals
+
+    assert signals.same_song("Kryptonite", "3 Doors Down", "Kryptonite", "3 Doors Down")
+    assert signals.same_song("Kryptonite", "3 Doors Down", "Kryptonite (Official Video)", "3 Doors Down")
+    assert signals.same_song("Kryptonite", "3 Doors Down", "Kryptonite [Remastered]", "3 Doors Down Topic")
+    assert signals.same_song("Bulleya", None, "Bulleya", "Amit Mishra")
+
+
+def test_same_song_does_not_over_match():
+    import signals
+
+    assert not signals.same_song("Kryptonite", "3 Doors Down", "Kryptonite", "Big Boi")
+    assert not signals.same_song("Kryptonite", "3 Doors Down", "Here Without You", "3 Doors Down")
+    assert not signals.same_song(None, "x", "Kryptonite", "x")
+
+
+# --- bridge expansion across a language filter -----------------------------
+
+
+def _bridge_db(db):
+    """Two English songs and one Punjabi one, all recognisable by genre."""
+    store.upsert_tracks(db, [
+        {"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick Lamar"]},
+        {"videoId": "eng2", "title": "Eng Two", "artists": ["Drake"]},
+        {"videoId": "pun1", "title": "Pun One", "artists": ["Karan Aujla"]},
+    ])
+    store.record_genre(db, "Hip-hop", ["eng1", "eng2"])
+    store.record_genre(db, "Bollywood & Indian", ["pun1"])
+
+
+def test_bridge_expand_is_skipped_when_there_is_already_enough(db):
+    survivors = [{"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick Lamar"], "base_score": 2}]
+    out, added = recommend.bridge_expand(
+        _BuildYT({}), db, survivors, exclude=set(), want=["english"],
+        exclude_languages=None, allow_unlabelled=False, needed=1,
+    )
+    assert out == survivors and added == 0
+
+
+def test_bridge_expand_reseeds_from_the_songs_that_passed(db):
+    # Filtering a Punjabi-seeded pool for English leaves almost nothing, so the
+    # survivors become seeds to reach more of that language.
+    _bridge_db(db)
+    yt = _BuildYT({"eng1": [{"videoId": "eng2", "title": "Eng Two", "artists": [{"name": "Drake"}]}]})
+    survivors = [{"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick Lamar"], "base_score": 2}]
+
+    out, added = recommend.bridge_expand(
+        yt, db, survivors, exclude=set(), want=["english"],
+        exclude_languages=None, allow_unlabelled=False, needed=4,
+    )
+    assert added == 1
+    assert sorted(c["videoId"] for c in out) == ["eng1", "eng2"]
+
+
+def test_bridge_expand_still_honours_the_language_filter(db):
+    _bridge_db(db)
+    yt = _BuildYT({"eng1": [{"videoId": "pun1", "title": "Pun One", "artists": [{"name": "Karan Aujla"}]}]})
+    survivors = [{"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick Lamar"], "base_score": 2}]
+
+    out, added = recommend.bridge_expand(
+        yt, db, survivors, exclude=set(), want=["english"],
+        exclude_languages=None, allow_unlabelled=False, needed=4,
+    )
+    assert added == 0
+    assert [c["videoId"] for c in out] == ["eng1"]
+
+
+def test_bridge_expand_respects_the_exclusion_set(db):
+    _bridge_db(db)
+    yt = _BuildYT({"eng1": [{"videoId": "eng2", "title": "Eng Two", "artists": [{"name": "Drake"}]}]})
+    survivors = [{"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick Lamar"], "base_score": 2}]
+
+    out, added = recommend.bridge_expand(
+        yt, db, survivors, exclude={"eng2"}, want=["english"],
+        exclude_languages=None, allow_unlabelled=False, needed=4,
+    )
+    assert added == 0
+
+
+def test_bridge_expand_gives_up_quietly_with_nothing_to_bridge_from(db):
+    out, added = recommend.bridge_expand(
+        _BuildYT({}), db, [], exclude=set(), want=["english"],
+        exclude_languages=None, allow_unlabelled=False, needed=5,
+    )
+    assert out == [] and added == 0
+
+
+def test_bridge_expand_survives_a_dead_bridge(db):
+    _bridge_db(db)
+
+    class _Dead(_BuildYT):
+        def get_watch_playlist(self, videoId, limit=25, radio=True):
+            raise YTMusicError("gone")
+
+    survivors = [{"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick"], "base_score": 2}]
+    out, added = recommend.bridge_expand(
+        _Dead({}), db, survivors, exclude=set(), want=["english"],
+        exclude_languages=None, allow_unlabelled=False, needed=5,
+    )
+    assert added == 0 and len(out) == 1
+
+
+# --- the notes users actually read -----------------------------------------
+
+
+def test_language_note_reports_both_kinds_of_drop():
+    note = recommend._language_note(
+        {"applied": True, "want": ["english"], "exclude": None, "kept": 3,
+         "dropped_wrong_language": 26, "dropped_unlabelled": 28, "allow_unlabelled": False},
+        limit=8,
+    )
+    assert "26 in other languages" in note
+    assert "28 with no language label" in note
+    assert "allow_unlabelled_language=True" in note
+    assert "fewer than the 8 requested" in note
+
+
+def test_language_note_stays_quiet_when_nothing_was_lost():
+    note = recommend._language_note(
+        {"applied": True, "want": ["english"], "exclude": None, "kept": 10,
+         "dropped_wrong_language": 0, "dropped_unlabelled": 0, "allow_unlabelled": False},
+        limit=10,
+    )
+    assert "dropped" not in note and "fewer than" not in note
+
+
+def test_language_note_describes_an_exclusion_filter():
+    note = recommend._language_note(
+        {"applied": True, "want": None, "exclude": ["punjabi"], "kept": 10,
+         "dropped_wrong_language": 2, "dropped_unlabelled": 0, "allow_unlabelled": True},
+        limit=10,
+    )
+    assert "not punjabi" in note
+
+
+def test_tempo_note_explains_why_unknown_bpm_is_kept():
+    note = recommend._tempo_note(
+        {"applied": True, "target_bpm": 99.0, "range": None, "with_known_tempo": 28,
+         "unknown_tempo_kept": 44, "dropped_out_of_range": 0}
+    )
+    assert "99bpm" in note and "44 kept with unknown BPM" in note
+
+
+def test_tempo_note_reports_a_hard_range():
+    note = recommend._tempo_note(
+        {"applied": True, "target_bpm": None, "range": [90, 110], "with_known_tempo": 31,
+         "unknown_tempo_kept": 0, "dropped_out_of_range": 25}
+    )
+    assert "90-110bpm" in note and "25 dropped as out of range" in note

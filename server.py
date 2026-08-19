@@ -268,6 +268,118 @@ def _artist_song_catalog(yt: YTMusic, channel_id: str) -> list[dict[str, Any]]:
 # --- tools -------------------------------------------------------------
 
 
+def _apply_result_filters(
+    ranked: list[dict[str, Any]],
+    seed_video_id: str | None,
+    seed_title: str | None,
+    seed_artist: str | None,
+    limit: int,
+    language=None,
+    exclude_languages=None,
+    allow_unlabelled_language: bool = False,
+    bpm: float | None = None,
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
+    match_seed_tempo: bool = False,
+    expand_across_language: bool = True,
+    max_per_artist: int = 2,
+) -> dict[str, Any]:
+    """Apply language and tempo filters to an already-ranked result list.
+
+    Shared by the similarity tools so a filter behaves identically no matter
+    which tool asked for it.
+    """
+    import filters
+    import recommend as _r
+    import signals
+
+    conn = _store()
+    notes: list[str] = []
+
+    if match_seed_tempo and bpm is None and seed_video_id:
+        track = _store_track(conn, seed_video_id, seed_title, seed_artist)
+        bpm = filters.seed_tempo(conn, seed_video_id, track["title"], track["artists"])
+        if bpm:
+            notes.append(f"Seed tempo is {bpm:.0f}bpm; results biased toward it.")
+        else:
+            notes.append("Seed tempo unknown (Deezer has no BPM for it), so tempo was not used.")
+
+    # Drop re-uploads of the seed itself. The videoId exclusion in
+    # _gather_seed_candidates can't see them: the same song exists many times
+    # over on YouTube under different ids.
+    seed_track = _store_track(conn, seed_video_id, seed_title, seed_artist) if seed_video_id else {}
+    seed_name = seed_track.get("title") or seed_title
+    seed_credit = seed_track.get("artists") or seed_artist
+    if seed_name:
+        ranked = [
+            song for song in ranked
+            if not signals.same_song(seed_name, seed_credit, song.get("title"),
+                                     " & ".join(song.get("artists") or []) or None)
+        ]
+
+    for song in ranked:
+        song["base_score"] = song.get("score", 1)
+
+    filtered, language_report = filters.apply_language(
+        conn, ranked, want=language, exclude=exclude_languages,
+        allow_unlabelled=allow_unlabelled_language,
+    )
+    if language_report["applied"]:
+        # Filtering a pool the seed's own language dominates leaves very little
+        # behind, so re-seed from the songs that did pass rather than handing
+        # back a short list.
+        if len(filtered) < limit and expand_across_language:
+            filtered, added = _r.bridge_expand(
+                _client(), conn, filtered, exclude=set(), want=language,
+                exclude_languages=exclude_languages,
+                allow_unlabelled=allow_unlabelled_language, needed=limit,
+            )
+            if added:
+                notes.append(
+                    f"Only {language_report['kept']} of the seed's own results were in the "
+                    f"requested language, so I re-seeded from those and found {added} more."
+                )
+                language_report = {**language_report, "kept": len(filtered), "bridge_added": added}
+        notes.append(_r._language_note(language_report, limit))
+
+    filtered, tempo_report = filters.apply_tempo(
+        conn, filtered, target_bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max
+    )
+    if tempo_report["applied"]:
+        notes.append(_r._tempo_note(tempo_report))
+
+    filtered.sort(key=lambda c: (-c.get("base_score", 0), c.get("title") or ""))
+
+    # Cap per artist. The mood path gets this from the sequencer; without it
+    # here, one prolific artist fills the whole result -- a language filter made
+    # that obvious by returning four DIVINE tracks out of eight.
+    picked, per_artist = [], {}
+    for song in filtered:
+        key = ((song.get("artists") or [None])[0] or "").lower()
+        if key and per_artist.get(key, 0) >= max_per_artist:
+            continue
+        if key:
+            per_artist[key] = per_artist.get(key, 0) + 1
+        song.pop("base_score", None)
+        picked.append(song)
+        if len(picked) >= limit:
+            break
+
+    return {
+        "songs": picked,
+        "notes": notes,
+        "filters": {"language": language_report, "tempo": tempo_report},
+    }
+
+
+def _store_track(conn, video_id: str, title: str | None, artist: str | None) -> dict[str, Any]:
+    """Best-known identity for a seed, preferring what the store already has."""
+    import store as _s
+
+    known = _s.get_track(conn, video_id) or {}
+    return {"title": known.get("title") or title, "artists": known.get("artists") or artist}
+
+
 @mcp.tool()
 @handle_errors
 def recommend_from_song(
@@ -276,7 +388,16 @@ def recommend_from_song(
     artist: str | None = None,
     limit: int = 20,
     same_artist_only: bool = False,
-) -> list[dict[str, Any]]:
+    language: list[str] | None = None,
+    exclude_languages: list[str] | None = None,
+    allow_unlabelled_language: bool = False,
+    bpm: float | None = None,
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
+    match_seed_tempo: bool = False,
+    expand_across_language: bool = True,
+    max_per_artist: int = 2,
+) -> dict[str, Any]:
     """Recommend new songs similar to a seed song.
 
     Seed the search either with a known `video_id`, or with `song` (a free-text
@@ -297,6 +418,29 @@ def recommend_from_song(
     to the seed's own artist(s), e.g. for "recommend songs BY artist X similar
     to song Y" requests.
 
+    `language` / `exclude_languages` filter the RESULTS independently of the
+    seed, which is the point: seeding from a Punjabi song with
+    language=["english"] returns English songs similar to it. Strict by
+    default -- candidates with no language label are dropped, since a
+    Punjabi-seeded pool is mostly Punjabi and keeping unlabelled ones would
+    hand back exactly what was excluded. Pass allow_unlabelled_language=True
+    to relax that; the response always reports what was dropped.
+
+    When a language filter leaves too few results -- seeding from a Punjabi
+    song and asking for English usually does -- the surviving songs are used as
+    fresh seeds to reach more of that language in the same neighbourhood, since
+    filtering alone can only return what happened to be in the seed's own pool.
+    Set expand_across_language=False to skip that and get the short list.
+
+    `match_seed_tempo=True` biases results toward the seed's own BPM (half-
+    and double-time count as close). `bpm` sets a tempo target directly, and
+    `bpm_min`/`bpm_max` bound it. Songs with no known BPM are kept and simply
+    not scored on tempo.
+
+    Returns {"songs": [...], "notes": [...], "filters": {...}} -- notes carry
+    anything the user should hear about, such as results dropped for having no
+    language label.
+
     The library exclusion set is cached for speed; newly liked songs are
     always honoured, but call refresh_library() after adding songs to a
     playlist by other means.
@@ -315,8 +459,17 @@ def recommend_from_song(
     merged = _merge_and_score([candidates])
     if same_artist_only:
         merged = _filter_same_artist(merged, seed_artist_names or ([artist] if artist else []))
+
     exclude = _library_video_ids(yt)
-    return _finalize(merged, exclude, limit)
+    ranked = _finalize(merged, exclude, limit * 12 if (language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo) else limit)
+
+    return _apply_result_filters(
+        ranked, seed_video_id=video_id, seed_title=song, seed_artist=artist,
+        limit=limit, language=language, exclude_languages=exclude_languages,
+        allow_unlabelled_language=allow_unlabelled_language,
+        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max, match_seed_tempo=match_seed_tempo,
+        expand_across_language=expand_across_language, max_per_artist=max_per_artist,
+    )
 
 
 @mcp.tool()
@@ -432,6 +585,12 @@ def recommend_for_mood(
     arc: str = "mirror",
     limit: int = 20,
     genres: list[str] | None = None,
+    language: list[str] | None = None,
+    exclude_languages: list[str] | None = None,
+    allow_unlabelled_language: bool = False,
+    bpm: float | None = None,
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
 ) -> dict[str, Any]:
     """Recommend new songs that match how the listener actually feels right now.
 
@@ -465,6 +624,17 @@ def recommend_for_mood(
     `genres` optionally restricts the seeds to the listener's own genre
     playlists, e.g. ["Punjabi", "Hip-Hop & Rap"].
 
+    `language` / `exclude_languages` filter the RESULTS, e.g.
+    language=["english"]. Strict by default: a candidate with no language label
+    is dropped, because someone asking for English only wants a guarantee. The
+    response says how many were dropped and why; pass
+    allow_unlabelled_language=True to keep them.
+
+    `bpm` biases ranking toward a tempo (half- and double-time count as close).
+    `bpm_min`/`bpm_max` bound it instead. Songs with no known BPM are KEPT and
+    simply not scored on tempo -- Deezer has no tempo for much of the
+    non-English catalogue, so dropping them would delete whole languages.
+
     The result carries `target` (the mood aimed at), `target_origin` (where it
     came from), `seeds` (which of their songs it grew from), `notes` (caveats
     worth repeating to the user) and `songs`, each with its slot, mood fit and
@@ -480,6 +650,9 @@ def recommend_for_mood(
     result = recommend.build(
         yt, conn, exclude=exclude, feeling=feeling, vector=vector,
         context=context, arc=arc, limit=limit, genres=genres,
+        language=language, exclude_languages=exclude_languages,
+        allow_unlabelled_language=allow_unlabelled_language,
+        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
     )
     _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
     return result

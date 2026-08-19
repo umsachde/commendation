@@ -568,3 +568,71 @@ rather than central, so raw fit had systematically buried them even when labelle
   different arc, same candidate pool; the arc changes the ordering and the destination.
 - **Rated fell 100% → 94%.** Distinctive seeds reach into catalogue the atlas never covered, so some picks
   now rank on signal agreement alone. That is the right trade, and the response says so.
+
+---
+
+## Addendum: BPM and language filtering (2026-08-19, user-requested)
+
+Two capabilities added after the v2 build, both requested directly.
+
+### BPM — reversing this document's own recommendation
+
+This plan argued for demoting BPM, and the user asked for it anyway. The original objection was
+narrower than it read: **tempo is a poor proxy for _mood_, which does not make it a poor proxy for
+_similarity_.** As a similarity and sequencing signal it is genuinely useful, which is what it now is.
+
+- **Source: Deezer's public API.** No key, no auth, no attribution requirement — a materially better
+  option than the GetSongBPM and AcousticBrainz routes this document originally weighed. AcousticBrainz
+  remains frozen; that assessment stands.
+- **Half- and double-time count as close** (`tempo.relative_distance` compares against b, b/2 and b*2).
+  170bpm drum-and-bass and 85bpm hip-hop share a pulse.
+- **Never propagated by artist**, unlike mood. An artist's songs share a sensibility, not a tempo;
+  propagating it would invent data. This asymmetry with `label.propagate_by_artist` is deliberate.
+- **Coverage measured before building**, and it is uneven in the now-familiar way: 6/6 on Pop, 4/6 on
+  Rock and Reggae, 1/6 on Punjabi and Bollywood. Verified the misses are genuine `bpm: 0` rather than
+  failed matching — every test track resolved to the correct song, and scanning deeper into search
+  results finds nothing. So fuzzy matching would not help, and **unknown tempo never drops a song.**
+
+### Language filtering
+
+"Songs like this Punjabi track, but only English ones" needs a language label on every candidate, and
+nothing in the API provides one.
+
+- **ytmusicapi cannot read the genre pages.** `get_mood_playlists()` raises KeyError on 25 of 27 genre
+  categories — those pages lead with a "Songs" carousel of track items where its parser expects
+  playlists. `taxonomy.genre_page` parses the raw browse response instead, which also harvests those
+  songs as genre-labelled tracks for free.
+- **Weighted voting, with English deliberately near-worthless (weight 1 against 10/50/100).** YouTube
+  files Punjabi and Hindi rap under "Hip-hop", so plain majority voting labelled Sidhu Moose Wala,
+  Karan Aujla and AP Dhillon as English. English is now the answer when nothing language-bearing is
+  evidenced, not something that can outvote real evidence.
+- **Playlist names are matched loosely** — `Punjabu` is a real playlist in this library, and an exact
+  `C - <genre>` match would have ignored it.
+- **Retrieval expands rather than just filtering.** This is the same lesson the mood engine needed and
+  it had to be learned twice: filtering a Punjabi-seeded pool for English returned 3 of 8 requested,
+  because the pool did not contain more. `recommend.bridge_expand` re-seeds from the songs that passed.
+  Measured: 3 results became a full 8, drawn from a pool of 79.
+
+### Two bugs found while testing this
+
+- **The seed came back as its own recommendation.** Excluding by videoId is not enough — YouTube carries
+  the same track many times over, so a seed resolved by search returns under a different id. Observed
+  live: seeding on "Kryptonite" returned Kryptonite. `signals.same_song` now matches on normalised
+  title and artist.
+- **No per-artist cap on the similarity path.** The mood path gets one from the sequencer; without it,
+  a language filter returned four DIVINE tracks out of eight.
+
+### Known limitations
+
+- **`recommend_from_song` now returns a dict**, not a list — `{"songs", "notes", "filters"}`. Filters
+  that silently drop results would be exactly the failure mode this project keeps guarding against, so
+  the notes had to have somewhere to live. `songs_by_artist` already had the richer shape.
+- **DIVINE is labelled English.** He raps largely in Hindi, but appears only under "Hip-hop" with no
+  Indian-genre or library evidence to the contrary. Genre-to-language inference has a floor, and this is
+  it.
+- **A hard `bpm_min`/`bpm_max` range still keeps unknown-tempo songs.** Arguably they should be dropped
+  when the range is explicit; keeping them preserves the non-English catalogue, and the note reports the
+  count either way.
+- **Tempo does not dominate ranking** (`TEMPO_WEIGHT` 0.35): a two-signal candidate at the wrong tempo
+  can still outrank a one-signal candidate at exactly the right one. Use `bpm_min`/`bpm_max` when tempo
+  is a requirement rather than a preference.
