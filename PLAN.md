@@ -80,8 +80,10 @@ No ML needed for v1 — simple, explainable scoring:
   - `recommend_from_playlist` seeded on a real playlist → 15 recommendations, zero overlap with Liked Music or the seed playlist.
 
 **Not done yet:**
-- No git repo initialized for this project yet (no `git init` / first commit).
-- Not registered with Claude Code yet (`claude mcp add commendation ...` from the README's step 3 hasn't been run).
 - v2 items below are all still open.
+
+**Since the above was written:**
+- Git repo initialized, pushed to `github.com/umsachde/commendation` (`origin/main`).
+- Registered with Claude Code via `claude mcp add commendation -s user ...` — connected.
 
 **Aside (does not affect commendation, but happened during this build):** a `remove_from_playlist` tool was added to the separate `ytmusic-mcp` project to clean up a duplicate-track bug found in a "C - Country" playlist while smoke-testing `recommend_from_playlist` against real data. That's `ytmusic-mcp` maintenance, unrelated to commendation's own scope — mentioned here only so a future agent doesn't wonder why an unrelated commit landed mid-build.
