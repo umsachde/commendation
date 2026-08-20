@@ -663,6 +663,16 @@ def recommend_for_mood(
     returns 32 (7 + 25), not 100. See `match_quality` in the result for the
     genuine/filler breakdown, and `notes` for the human-readable version.
 
+    If they also point at a specific playlist ("look at this playlist and
+    recommend me songs for how I feel"), use recommend_from_playlist_for_mood
+    instead -- it seeds from that playlist's own fitting tracks rather than
+    from the whole library.
+
+    This is READ-ONLY. If they asked for a PLAYLIST rather than a list, this
+    tool is step one of three: get the songs here, create the playlist from the
+    returned videoIds with a playlist-management tool, then call
+    refresh_library() so those tracks are excluded from later recommendations.
+
     The result carries `target` (the mood aimed at), `target_origin` (where it
     came from), `seeds` (which of their songs it grew from), `notes` (caveats
     worth repeating to the user), `match_quality` (genuine vs. filler counts)
@@ -682,6 +692,113 @@ def recommend_for_mood(
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
     )
+    _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
+    return result
+
+
+@mcp.tool()
+@handle_errors
+def recommend_from_playlist_for_mood(
+    playlist_id: str,
+    feeling: str | None = None,
+    vector: dict[str, float] | None = None,
+    context: str | None = None,
+    arc: str = "mirror",
+    limit: int = 20,
+    language: list[str] | None = None,
+    exclude_languages: list[str] | None = None,
+    allow_unlabelled_language: bool = False,
+    bpm: float | None = None,
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
+    seed_cap: int | None = None,
+) -> dict[str, Any]:
+    """Recommend new songs from ONE playlist, shaped by how the listener feels.
+
+    For "I feel like this -- look at this playlist and find me songs". Use this
+    over recommend_from_playlist whenever a mood is part of the ask, and over
+    recommend_for_mood whenever a specific playlist is.
+
+    Unlike recommend_from_playlist, which samples a few tracks at random and
+    ignores mood entirely: EVERY track in the playlist is read and scored for
+    mood fit, and only genuine matches -- tracks whose own mood resolves and
+    actually fits the target -- are used as seeds. An off-mood playlist
+    therefore yields few seeds or none, which is reported rather than papered
+    over by seeding from tracks that don't fit.
+
+    Seeding costs ~4 API calls per seed, so the best-fitting seeds are capped
+    (default 20, override with `seed_cap`). `seed_report` in the result says how
+    many tracks were considered, how many were genuine, and how many were
+    capped away.
+
+    Mood arguments behave exactly as in recommend_for_mood (`vector` preferred,
+    then `feeling`, then `context`; falls back to inferred mood). `arc` shapes
+    the sequence the same way. Results are guaranteed absent from Liked Music,
+    from this playlist, and from every other playlist -- and `limit` is a
+    ceiling, not a guarantee: filler is capped at 25% of it, same as
+    recommend_for_mood.
+
+    This is READ-ONLY -- it never creates a playlist or adds anything anywhere.
+    To turn the result into a real playlist, pass the returned videoIds to a
+    playlist-management tool, then call refresh_library() so the new tracks are
+    excluded from later recommendations.
+    """
+    import recommend
+    import store as _s
+
+    yt = _client()
+    conn = _store()
+
+    playlist = yt.get_playlist(playlist_id, limit=None)
+    tracks = [t for t in playlist.get("tracks", []) if t.get("videoId")]
+    if not tracks:
+        raise RuntimeError(f"Playlist {playlist_id!r} has no playable tracks to read.")
+
+    resolved = recommend.resolve_target(conn, yt, feeling, vector, context)
+    picked = recommend.pick_seeds_from_playlist(
+        conn, tracks, resolved["target"], cap=seed_cap or recommend.PLAYLIST_SEED_CAP
+    )
+    if not picked["seeds"]:
+        raise RuntimeError(
+            f"No track in this playlist fits that mood well enough to seed from "
+            f"({picked['considered']} considered). Seeding from tracks that don't fit "
+            "would just return the playlist's own mood back. Try recommend_for_mood to "
+            "draw on the whole library instead, or run scripts/label_library.py if these "
+            "tracks are simply unlabelled."
+        )
+
+    exclude = (
+        _library_video_ids(yt)
+        | _s.rejected_video_ids(conn)
+        | {t["videoId"] for t in tracks}
+    )
+
+    result = recommend.build(
+        yt, conn, exclude=exclude, feeling=feeling, vector=vector,
+        context=context, arc=arc, limit=limit,
+        language=language, exclude_languages=exclude_languages,
+        allow_unlabelled_language=allow_unlabelled_language,
+        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
+        seeds=picked["seeds"], resolved=resolved,
+    )
+    result["seed_report"] = {
+        "playlist_id": playlist_id,
+        "considered": picked["considered"],
+        "genuine": picked["genuine"],
+        "seeded_from": len(picked["seeds"]),
+        "capped": picked["capped"],
+    }
+    if picked["capped"]:
+        result["notes"].append(
+            f"{picked['genuine']} of {picked['considered']} playlist tracks fit this mood; "
+            f"seeded from the best {len(picked['seeds'])} of them."
+        )
+    else:
+        result["notes"].append(
+            f"Seeded from {len(picked['seeds'])} of {picked['considered']} playlist tracks "
+            "-- the ones that genuinely fit this mood."
+        )
+
     _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
     return result
 

@@ -26,6 +26,12 @@ import store
 SEED_COUNT = 6
 CANDIDATES_PER_SLOT = 12
 
+# Seeding from a playlist reads every track in it, but each seed costs ~4 API
+# calls -- a 100-song playlist would fire ~400. So every track is *considered*
+# (scored for mood fit, kept only if it's a genuine match) and the best of them
+# are what actually seed the search.
+PLAYLIST_SEED_CAP = 20
+
 # How much of a requested count is allowed to be filler (unrated, or rated but
 # a poor fit) rather than a genuine mood match. Asking for 100 and getting 7
 # real matches shouldn't come back as 100 -- it should come back as 7 plus a
@@ -193,6 +199,70 @@ def pick_seeds(conn: Any, target: dict[str, float], count: int = SEED_COUNT, gen
         if len(picked) >= count:
             break
     return picked
+
+
+def pick_seeds_from_playlist(
+    conn: Any,
+    tracks: list[dict[str, Any]],
+    target: dict[str, float],
+    cap: int = PLAYLIST_SEED_CAP,
+) -> dict[str, Any]:
+    """Choose seeds from one playlist's own tracks, not the whole library.
+
+    pick_seeds() answers "what in this person's library fits this mood".
+    This answers a narrower question: "what in *this playlist* fits this mood",
+    for when someone points at a playlist and a feeling together.
+
+    Every track is considered, but only genuine matches seed the search -- a
+    track whose own mood can't be resolved, or which fits the target no better
+    than an unlabelled song is assumed to, would send the radio somewhere the
+    listener didn't ask for. On an off-mood playlist that legitimately yields
+    few seeds (or none), which the caller reports rather than papering over.
+    """
+    store.upsert_tracks(conn, tracks)
+    ids = [t["videoId"] for t in tracks if t.get("videoId")]
+    moods = label.resolve_or_derive(conn, ids)
+
+    scored = []
+    for video_id, entry in moods.items():
+        fit = moodspace.fit(entry["vector"], target)
+        if fit <= arc_module.UNRATED_FIT:
+            continue
+        # Read identity back from the store, which normalised it on upsert --
+        # the raw API hands artists back in several shapes.
+        track = store.get_track(conn, video_id) or {}
+        scored.append(
+            {
+                "videoId": video_id,
+                "title": track.get("title"),
+                "artists": track.get("artists"),
+                "fit": fit,
+                "seed_score": moodspace.seed_score(entry["vector"], target, entry["confidence"]),
+                "mood": entry["vector"],
+            }
+        )
+
+    scored.sort(key=lambda s: -s["seed_score"])
+
+    # Same reasoning as pick_seeds: spread across artists so the seeds describe
+    # a mood rather than one artist's back catalogue.
+    picked, seen_artists = [], set()
+    for entry in scored:
+        artist = label.primary_artist(entry["artists"])
+        if artist and artist in seen_artists:
+            continue
+        if artist:
+            seen_artists.add(artist)
+        picked.append(entry)
+        if len(picked) >= cap:
+            break
+
+    return {
+        "seeds": picked,
+        "considered": len(ids),
+        "genuine": len(scored),
+        "capped": max(0, len(scored) - len(picked)),
+    }
 
 
 def atlas_neighbours(conn: Any, target: dict[str, float], limit: int = ATLAS_NEIGHBOUR_LIMIT) -> list[dict[str, Any]]:
@@ -403,12 +473,27 @@ def build(
     bpm_min: float | None = None,
     bpm_max: float | None = None,
     use_history: bool = True,
+    seeds: list[dict[str, Any]] | None = None,
+    resolved: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Produce a mood-shaped, ordered set of new songs."""
-    resolved = resolve_target(conn, yt if use_history else None, feeling, vector, context)
+    """Produce a mood-shaped, ordered set of new songs.
+
+    `seeds` overrides where the search starts. By default seeds are drawn from
+    the whole library (pick_seeds); pass them in to seed from somewhere
+    narrower, e.g. one playlist's own tracks (pick_seeds_from_playlist).
+
+    `resolved` passes in an already-resolved target (from resolve_target). A
+    caller that needed the mood *before* calling build -- to choose seeds with
+    it, say -- must pass it back rather than let it be resolved twice: an
+    inferred mood reads listening history, so resolving again is both a second
+    API call and a chance for the two to disagree.
+    """
+    if resolved is None:
+        resolved = resolve_target(conn, yt if use_history else None, feeling, vector, context)
     target = resolved["target"]
 
-    seeds = pick_seeds(conn, target, genres=genres)
+    if seeds is None:
+        seeds = pick_seeds(conn, target, genres=genres)
     notes = list(resolved.get("evidence", []))
 
     per_seed = []

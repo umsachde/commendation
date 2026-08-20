@@ -15,6 +15,7 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 | `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
 | `refresh_library()` | Force-rebuild the cached library exclusion set. See [Library cache](#library-cache). |
 | `recommend_for_mood(feeling=None, vector=None, context=None, arc="mirror", limit=20, genres=None, language=None, bpm=None, ...)` | **v2.** Recommend new songs matching how you actually feel, shaped into a sequence that moves. See [Mood](#mood-aware-recommendations-v2). |
+| `recommend_from_playlist_for_mood(playlist_id, feeling=None, vector=None, context=None, arc="mirror", limit=20, seed_cap=None, ...)` | **v2.** Mood *and* a playlist together: reads every track, seeds only from the ones that genuinely fit. See [Mood + one playlist](#mood--one-playlist). |
 | `read_my_mood()` | **v2.** Infer your current mood from recent listening, *with the evidence for it*. |
 | `explain_recommendation(video_id)` | **v2.** Why a song was picked, in mood terms. |
 | `record_feedback(video_id, reaction)` | **v2.** `loved` / `saved` / `skipped` / `wrong_mood`. Rejections are never recommended again. |
@@ -88,6 +89,50 @@ without any API key; the Claude layer closes the rest.
 
 After a full crawl, measured: **71.3% library coverage** — 553 songs from artist propagation, 480 from
 playlist membership.
+
+### Mood + one playlist
+
+*"I feel like this — look at this playlist and find me songs."*
+
+`recommend_from_playlist` samples five tracks at random and ignores mood
+entirely; `recommend_for_mood` honours the mood but draws seeds from the whole
+library. `recommend_from_playlist_for_mood` is the intersection, and it treats
+the playlist as evidence rather than as a bag to sample from:
+
+1. **Every** track in the playlist is read and scored for mood fit.
+2. Only *genuine* matches seed the search — a track whose mood can't be
+   resolved, or that fits the target no better than an unlabelled song is
+   assumed to, is not used. Seeding from tracks that don't fit would just hand
+   back the playlist's own mood.
+3. Seeds are spread across artists and capped (default 20, `seed_cap` to
+   override). Each seed costs ~4 API calls, so a 100-song playlist would
+   otherwise fire ~400.
+
+`seed_report` says how many tracks were considered, how many were genuine, and
+how many were capped away. If nothing fits, it says so and suggests
+`recommend_for_mood` instead rather than returning off-mood results.
+
+Exclusion is the same hard guarantee as everywhere else: nothing from Liked
+Music, nothing from the seed playlist, nothing from any other playlist. The 25%
+filler cap applies too.
+
+### Turning a recommendation into a playlist
+
+re-com is **read-only** — it never creates a playlist or adds a track anywhere.
+That is deliberate: a recommendation engine that also mutates the library can't
+be trusted to have excluded what it just added.
+
+So "recommend me songs for this mood and make it a playlist" is two tools, in
+this order:
+
+1. `recommend_for_mood(...)` (or `recommend_from_playlist_for_mood(...)`) to get
+   the songs.
+2. A playlist-management tool — e.g. the separate `ytmusic` MCP server's
+   `create_playlist` / `add_to_playlist` — to create it from the returned
+   `videoId`s.
+3. **`refresh_library()`**, so the tracks you just added are excluded from the
+   next recommendation. Without this, the cached exclusion set is stale for up
+   to `RECOM_CACHE_TTL` and a later call can recommend a song you just saved.
 
 ### Honesty about shortfalls
 

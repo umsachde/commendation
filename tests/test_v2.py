@@ -869,6 +869,100 @@ def test_build_pulls_from_mood_playlists_even_with_no_library_seeds(db):
     assert result["songs"][0]["sources"] == [recommend.ATLAS_SOURCE]
 
 
+# --- pick_seeds_from_playlist ----------------------------------------------
+
+
+def _pl_track(vid, title=None, artist=None):
+    return {"videoId": vid, "title": title or vid.upper(), "artists": [{"name": artist or f"Artist {vid}"}]}
+
+
+def test_playlist_seeds_keep_only_genuine_mood_matches(db):
+    tracks = [_pl_track("fits"), _pl_track("misses")]
+    store.upsert_tracks(db, tracks)
+    store.put_track_moods(db, "atlas", [
+        ("fits", ms.ANCHORS["Sad"], 0.9),
+        ("misses", ms.ANCHORS["Party"], 0.9),
+    ])
+
+    picked = recommend.pick_seeds_from_playlist(db, tracks, ms.ANCHORS["Sad"])
+
+    assert [s["videoId"] for s in picked["seeds"]] == ["fits"]
+    assert picked["considered"] == 2
+    assert picked["genuine"] == 1
+
+
+def test_playlist_seeds_skip_tracks_with_no_resolvable_mood(db):
+    tracks = [_pl_track("known"), _pl_track("unlabelled")]
+    store.upsert_tracks(db, tracks)
+    store.put_track_moods(db, "atlas", [("known", ms.ANCHORS["Sad"], 0.9)])
+
+    picked = recommend.pick_seeds_from_playlist(db, tracks, ms.ANCHORS["Sad"])
+
+    assert [s["videoId"] for s in picked["seeds"]] == ["known"]
+    assert picked["considered"] == 2
+
+
+def test_playlist_seeds_are_capped_and_report_the_overflow(db):
+    tracks = [_pl_track(f"t{i}", artist=f"Artist {i}") for i in range(30)]
+    store.upsert_tracks(db, tracks)
+    store.put_track_moods(db, "atlas", [(t["videoId"], ms.ANCHORS["Sad"], 0.9) for t in tracks])
+
+    picked = recommend.pick_seeds_from_playlist(db, tracks, ms.ANCHORS["Sad"], cap=5)
+
+    assert len(picked["seeds"]) == 5
+    assert picked["considered"] == 30
+    assert picked["genuine"] == 30
+    assert picked["capped"] == 25
+
+
+def test_playlist_seeds_spread_across_artists(db):
+    tracks = [_pl_track(f"t{i}", artist="One Artist") for i in range(5)]
+    store.upsert_tracks(db, tracks)
+    store.put_track_moods(db, "atlas", [(t["videoId"], ms.ANCHORS["Sad"], 0.9) for t in tracks])
+
+    picked = recommend.pick_seeds_from_playlist(db, tracks, ms.ANCHORS["Sad"])
+
+    assert len(picked["seeds"]) == 1
+
+
+def test_playlist_seeds_empty_when_nothing_fits(db):
+    tracks = [_pl_track("party")]
+    store.upsert_tracks(db, tracks)
+    store.put_track_moods(db, "atlas", [("party", ms.ANCHORS["Party"], 0.9)])
+
+    picked = recommend.pick_seeds_from_playlist(db, tracks, ms.ANCHORS["Sad"])
+
+    assert picked["seeds"] == []
+    assert picked["genuine"] == 0
+
+
+def test_build_accepts_injected_seeds_instead_of_library_seeds(db):
+    # No library at all -- pick_seeds would return nothing, so anything that
+    # comes back proves the injected seeds were used.
+    seeds = [{"videoId": "pl1", "title": "PL1", "artists": "A", "fit": 0.9,
+              "seed_score": 0.9, "mood": ms.ANCHORS["Sad"]}]
+    yt = _BuildYT({"pl1": [{"videoId": "found", "title": "Found", "artists": [{"name": "Fresh"}]}]})
+
+    result = recommend.build(yt, db, exclude=set(), feeling="heartbroken", limit=5, seeds=seeds)
+
+    assert [s["videoId"] for s in result["songs"]] == ["found"]
+
+
+def test_build_does_not_re_resolve_a_passed_in_target(db):
+    class _NoHistory(_BuildYT):
+        def get_history(self):
+            raise AssertionError("history must not be read when the target is passed in")
+
+    resolved = recommend.resolve_target(db, None, "heartbroken", None, None)
+    seeds = [{"videoId": "pl1", "title": "PL1", "artists": "A", "fit": 0.9,
+              "seed_score": 0.9, "mood": ms.ANCHORS["Sad"]}]
+    yt = _NoHistory({"pl1": [{"videoId": "found", "title": "F", "artists": [{"name": "X"}]}]})
+
+    result = recommend.build(yt, db, exclude=set(), limit=5, seeds=seeds, resolved=resolved)
+
+    assert result["target"] == {k: round(v, 3) for k, v in resolved["target"].items()}
+
+
 def test_build_caps_fluff_at_25_percent_of_requested(db):
     _library(db, ("seed", "Seeder", "Sad"))
     genuine = [
@@ -1004,6 +1098,85 @@ def test_recommend_for_mood_returns_a_sequence_and_logs_it(wired):
     assert [s["videoId"] for s in result["songs"]] == ["new1"]
     logged = db.execute("SELECT video_id, feeling, arc FROM recommendation").fetchall()
     assert [tuple(r) for r in logged] == [("new1", "heartbroken", "mirror")]
+
+
+class _PlaylistYT(_BuildYT):
+    """_BuildYT plus a readable playlist, for the mood+playlist tool."""
+
+    def __init__(self, radio, playlist_tracks):
+        super().__init__(radio)
+        self._playlist_tracks = playlist_tracks
+
+    def get_playlist(self, playlistId, limit=None):
+        return {"tracks": self._playlist_tracks}
+
+
+@pytest.fixture
+def wired_playlist(db, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "_store", lambda: db)
+    monkeypatch.setattr(server, "_library_video_ids", lambda _yt: set())
+
+    def _wire(radio, playlist_tracks):
+        yt = _PlaylistYT(radio, playlist_tracks)
+        monkeypatch.setattr(server, "_client", lambda: yt)
+        return server, db, yt
+
+    return _wire
+
+
+def test_playlist_mood_tool_seeds_only_from_fitting_tracks(wired_playlist):
+    fits, misses = _pl_track("fits"), _pl_track("misses")
+    server, db, _ = wired_playlist(
+        {"fits": [{"videoId": "found", "title": "Found", "artists": [{"name": "Fresh"}]}],
+         "misses": [{"videoId": "wrong", "title": "Wrong", "artists": [{"name": "Off"}]}]},
+        [fits, misses],
+    )
+    store.upsert_tracks(db, [fits, misses])
+    store.put_track_moods(db, "atlas", [
+        ("fits", ms.ANCHORS["Sad"], 0.9),
+        ("misses", ms.ANCHORS["Party"], 0.9),
+    ])
+
+    result = server.recommend_from_playlist_for_mood("PL1", feeling="heartbroken", limit=5)
+
+    assert result["seed_report"]["considered"] == 2
+    assert result["seed_report"]["genuine"] == 1
+    assert result["seed_report"]["seeded_from"] == 1
+    # "wrong" came from the off-mood track, which never got to seed.
+    assert "wrong" not in [s["videoId"] for s in result["songs"]]
+    assert "found" in [s["videoId"] for s in result["songs"]]
+
+
+def test_playlist_mood_tool_never_returns_the_playlists_own_tracks(wired_playlist):
+    fits = _pl_track("fits")
+    server, db, _ = wired_playlist(
+        {"fits": [{"videoId": "fits", "title": "FITS", "artists": [{"name": "Artist fits"}]}]},
+        [fits],
+    )
+    store.upsert_tracks(db, [fits])
+    store.put_track_moods(db, "atlas", [("fits", ms.ANCHORS["Sad"], 0.9)])
+
+    result = server.recommend_from_playlist_for_mood("PL1", feeling="heartbroken", limit=5)
+
+    assert "fits" not in [s["videoId"] for s in result["songs"]]
+
+
+def test_playlist_mood_tool_explains_itself_when_nothing_fits(wired_playlist):
+    party = _pl_track("party")
+    server, db, _ = wired_playlist({}, [party])
+    store.upsert_tracks(db, [party])
+    store.put_track_moods(db, "atlas", [("party", ms.ANCHORS["Party"], 0.9)])
+
+    with pytest.raises(RuntimeError, match="fits that mood"):
+        server.recommend_from_playlist_for_mood("PL1", feeling="heartbroken", limit=5)
+
+
+def test_playlist_mood_tool_rejects_an_empty_playlist(wired_playlist):
+    server, _, _ = wired_playlist({}, [])
+    with pytest.raises(RuntimeError, match="no playable tracks"):
+        server.recommend_from_playlist_for_mood("PL1", feeling="heartbroken")
 
 
 def test_recommend_for_mood_honours_recorded_rejections(wired):
