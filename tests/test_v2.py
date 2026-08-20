@@ -834,7 +834,9 @@ def test_build_boosts_songs_by_artists_already_in_the_library(db):
             {"videoId": "bystranger", "title": "B", "artists": [{"name": "Stranger"}]},
         ]
     })
-    result = recommend.build(yt, db, exclude={"seed", "known"}, feeling="heartbroken", limit=2)
+    # limit=8 keeps both unrated candidates under the fluff cap (ceil(8*0.25)=2)
+    # -- this test is about the artist boost, not match-quality capping.
+    result = recommend.build(yt, db, exclude={"seed", "known"}, feeling="heartbroken", limit=8)
     by_id = {s["videoId"]: s for s in result["songs"]}
     assert by_id["byknown"]["known_artist"] is True
     assert by_id["bystranger"]["known_artist"] is False
@@ -865,6 +867,60 @@ def test_build_pulls_from_mood_playlists_even_with_no_library_seeds(db):
     result = recommend.build(_BuildYT({}), db, exclude=set(), feeling="heartbroken", limit=1)
     assert [s["videoId"] for s in result["songs"]] == ["atlassong"]
     assert result["songs"][0]["sources"] == [recommend.ATLAS_SOURCE]
+
+
+def test_build_caps_fluff_at_25_percent_of_requested(db):
+    _library(db, ("seed", "Seeder", "Sad"))
+    genuine = [
+        {"videoId": f"genuine{i}", "title": f"Genuine {i}", "artists": [{"name": f"GenuineArtist{i}"}]}
+        for i in range(7)
+    ]
+    filler = [
+        {"videoId": f"filler{i}", "title": f"Filler {i}", "artists": [{"name": f"FillerArtist{i}"}]}
+        for i in range(40)
+    ]
+    yt = _BuildYT({"seed": genuine + filler})
+    store.put_track_moods(db, "atlas", [(t["videoId"], ms.ANCHORS["Sad"], 0.9) for t in genuine])
+
+    result = recommend.build(yt, db, exclude={"seed"}, feeling="heartbroken", arc="mirror", limit=100)
+
+    assert result["match_quality"] == {"genuine": 7, "requested": 100, "fluff_cap": 25, "fluff_used": 25}
+    assert len(result["songs"]) == 32
+    assert all(vid.startswith("genuine") for vid in [s["videoId"] for s in result["songs"][:7]])
+    assert any("Only 7 songs genuinely matched" in n for n in result["notes"])
+
+
+def test_build_never_caps_when_enough_genuine_matches_exist(db):
+    _library(db, ("seed", "Seeder", "Sad"))
+    genuine = [
+        {"videoId": f"genuine{i}", "title": f"Genuine {i}", "artists": [{"name": f"GenuineArtist{i}"}]}
+        for i in range(5)
+    ]
+    yt = _BuildYT({"seed": genuine})
+    store.put_track_moods(db, "atlas", [(t["videoId"], ms.ANCHORS["Sad"], 0.9) for t in genuine])
+
+    result = recommend.build(yt, db, exclude={"seed"}, feeling="heartbroken", limit=5)
+
+    assert len(result["songs"]) == 5
+    assert result["match_quality"]["genuine"] == 5
+    assert not any("genuinely matched" in n for n in result["notes"])
+
+
+def test_build_collapses_remix_variants(db):
+    _library(db, ("seed", "Seeder", "Sad"))
+    yt = _BuildYT({
+        "seed": [
+            {"videoId": "plain", "title": "Dead and Gone", "artists": [{"name": "T.I."}]},
+            {
+                "videoId": "remix",
+                "title": "Dead and Gone (feat. Justin Timberlake)",
+                "artists": [{"name": "T.I."}, {"name": "Justin Timberlake"}],
+            },
+        ]
+    })
+    result = recommend.build(yt, db, exclude={"seed"}, feeling="heartbroken", limit=5)
+    assert len(result["songs"]) == 1
+    assert any("remix/feature variant" in n for n in result["notes"])
 
 
 def test_build_never_recommends_its_own_seed(db):

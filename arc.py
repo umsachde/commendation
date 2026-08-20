@@ -43,6 +43,11 @@ _ARRIVAL = 0.85
 # 1.0 for exactly the high-energy moods this arc is for, flattening the curve.
 _HOLD_DIP = 0.22
 
+# The fit score an unlabelled candidate is assumed to have -- a guess, not
+# evidence. Callers use this as the bar a *rated* song's real fit must clear
+# to count as a genuine match rather than filler (see recommend.build).
+UNRATED_FIT = 0.45
+
 
 def targets(start: dict[str, float], arc: str, count: int) -> list[dict[str, float]]:
     """The mood each slot in the sequence is aiming at."""
@@ -78,7 +83,7 @@ def sequence(
     candidates: list[dict[str, Any]],
     slot_targets: list[dict[str, float]],
     max_per_artist: int = 2,
-    unrated_fit: float = 0.45,
+    unrated_fit: float = UNRATED_FIT,
 ) -> list[dict[str, Any]]:
     """Assign candidates to slots, best fit first, with variety constraints.
 

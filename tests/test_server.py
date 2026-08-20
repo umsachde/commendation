@@ -116,14 +116,18 @@ def test_merge_and_score_keeps_candidates_separate():
 # --- _finalize -------------------------------------------------------------
 
 
-def _candidate(vid, score, title="T", sources=("radio",)):
-    return {"videoId": vid, "title": title, "artists": [], "album": None, "score": score, "sources": set(sources)}
+def _candidate(vid, score, title=None, sources=("radio",)):
+    return {
+        "videoId": vid, "title": title or f"Song {vid}", "artists": [], "album": None,
+        "score": score, "sources": set(sources),
+    }
 
 
 def test_finalize_excludes_ids():
     merged = {"v1": _candidate("v1", 1), "v2": _candidate("v2", 2)}
-    out = _finalize(merged, exclude={"v1"}, limit=10)
+    out, collapsed = _finalize(merged, exclude={"v1"}, limit=10)
     assert [c["videoId"] for c in out] == ["v2"]
+    assert collapsed == 0
 
 
 def test_finalize_sorts_by_score_desc_then_title_asc():
@@ -132,21 +136,33 @@ def test_finalize_sorts_by_score_desc_then_title_asc():
         "b": _candidate("b", 3, title="Apple"),
         "c": _candidate("c", 3, title="Banana"),
     }
-    out = _finalize(merged, exclude=set(), limit=10)
+    out, _ = _finalize(merged, exclude=set(), limit=10)
     assert [c["videoId"] for c in out] == ["b", "c", "a"]
 
 
 def test_finalize_respects_limit():
     merged = {str(i): _candidate(str(i), i) for i in range(5)}
-    out = _finalize(merged, exclude=set(), limit=2)
+    out, _ = _finalize(merged, exclude=set(), limit=2)
     assert len(out) == 2
     assert [c["videoId"] for c in out] == ["4", "3"]
 
 
 def test_finalize_sources_sorted_in_output():
     merged = {"v1": _candidate("v1", 1, sources=("related", "artist", "radio"))}
-    out = _finalize(merged, exclude=set(), limit=10)
+    out, _ = _finalize(merged, exclude=set(), limit=10)
     assert out[0]["sources"] == ["artist", "radio", "related"]
+
+
+def test_finalize_collapses_variants_keeps_higher_score():
+    merged = {
+        "v1": _candidate("v1", 2, title="Dead and Gone"),
+        "v2": _candidate("v2", 5, title="Dead and Gone (feat. Justin Timberlake)"),
+    }
+    merged["v1"]["artists"] = ["T.I."]
+    merged["v2"]["artists"] = ["T.I.", "Justin Timberlake"]
+    out, collapsed = _finalize(merged, exclude=set(), limit=10)
+    assert [c["videoId"] for c in out] == ["v2"]
+    assert collapsed == 1
 
 
 # --- _liked_video_ids --------------------------------------------------
@@ -333,6 +349,42 @@ def test_songs_by_artist_excludes_liked_and_all_playlists(monkeypatch):
     assert [s["videoId"] for s in result["songs"]] == ["s1"]
 
 
+def test_songs_by_artist_collapses_remix_variants(monkeypatch):
+    yt = _FakeYT(
+        search_results={"T.I.": [{"artist": "T.I.", "browseId": "UC1"}]},
+        artists={
+            "UC1": {
+                "songs": {
+                    "browseId": "VLPL1",
+                    "results": [],
+                }
+            }
+        },
+        playlists={
+            "VLPL1": {
+                "tracks": [
+                    {"videoId": "s1", "title": "Dead and Gone", "artists": [{"name": "T.I."}]},
+                    {
+                        "videoId": "s2",
+                        "title": "Dead and Gone (feat. Justin Timberlake)",
+                        "artists": [{"name": "T.I."}, {"name": "Justin Timberlake"}],
+                    },
+                    {"videoId": "s3", "title": "Whatever You Like", "artists": [{"name": "T.I."}]},
+                ]
+            },
+            "LM": {"tracks": []},
+        },
+        library_playlists=[],
+    )
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = songs_by_artist("T.I.", limit=10)
+
+    assert result["found"] == 2
+    assert result["variants_collapsed"] == 1
+    assert [s["videoId"] for s in result["songs"]] == ["s1", "s3"]
+
+
 def test_songs_by_artist_reports_shortfall_instead_of_padding(monkeypatch):
     yt = _FakeYT(
         search_results={"Small Artist": [{"artist": "Small Artist", "browseId": "UC1"}]},
@@ -377,7 +429,7 @@ def test_songs_by_artist_no_artist_match_returns_zero_found(monkeypatch):
 
     result = songs_by_artist("Nobody", limit=10)
 
-    assert result == {"artist": None, "requested": 10, "found": 0, "songs": []}
+    assert result == {"artist": None, "requested": 10, "found": 0, "variants_collapsed": 0, "songs": []}
 
 
 # --- _gather_seed_candidates --------------------------------------------

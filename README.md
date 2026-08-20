@@ -89,6 +89,21 @@ without any API key; the Claude layer closes the rest.
 After a full crawl, measured: **71.3% library coverage** — 553 songs from artist propagation, 480 from
 playlist membership.
 
+### Honesty about shortfalls
+
+`limit` is a ceiling, not a guarantee. `recommend_for_mood`'s arc sequencer will
+fill every requested slot from whatever's left in the candidate pool if you let
+it, quality be damned -- asking for 100 with 7 songs that genuinely fit the mood
+otherwise came back as 100, the other 93 being progressively worse guesses (an
+unrated song still gets a placeholder fit score and can still win a slot).
+
+Filler -- unrated, or rated but a poor fit -- is capped at 25% of `limit`.
+Genuine matches (rated, with a real fit above the unrated baseline) are never
+capped or dropped for this reason. Asking for 100 with 7 genuine matches
+returns 32 (7 + 25), not 100. The result's `match_quality` field reports
+`genuine`/`requested`/`fluff_cap`/`fluff_used`, and `notes` explains it in
+plain language.
+
 ### Measuring quality
 
 `scripts/quality_check.py` scores a fixed set of mood/arc cases so changes can be judged by number rather

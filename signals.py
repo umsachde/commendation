@@ -169,7 +169,11 @@ def _filter_same_artist(merged: dict[str, dict[str, Any]], target_names: list[st
     return {vid: c for vid, c in merged.items() if _artist_names_match(c["artists"], targets_lower)}
 
 
-def _finalize(merged: dict[str, dict[str, Any]], exclude: set[str], limit: int) -> list[dict[str, Any]]:
+def _finalize(merged: dict[str, dict[str, Any]], exclude: set[str], limit: int) -> tuple[list[dict[str, Any]], int]:
+    """Returns (songs, variants_collapsed) -- the latter is how many
+    remix/feature variants were merged into their sibling, for callers that
+    want to surface it."""
+    merged, collapsed = _collapse_variants(merged)
     ranked = [c for vid, c in merged.items() if vid not in exclude]
     ranked.sort(key=lambda c: (-c["score"], c.get("title") or ""))
     return [
@@ -182,7 +186,7 @@ def _finalize(merged: dict[str, dict[str, Any]], exclude: set[str], limit: int) 
             "sources": sorted(c["sources"]),
         }
         for c in ranked[:limit]
-    ]
+    ], collapsed
 
 def same_song(title_a: str | None, artist_a: str | None, title_b: str | None, artist_b: str | None) -> bool:
     """Whether two credits are the same song under different uploads.
@@ -214,3 +218,45 @@ def _song_key(title: str) -> str:
         if marker in lowered:
             lowered = lowered.split(marker)[0]
     return "".join(ch for ch in lowered if ch.isalnum())
+
+
+def _collapse_variants(pool: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], int]:
+    """Collapse remix/feature variants of the same underlying song down to
+    one candidate each, keeping the highest-scoring variant.
+
+    "Dead and Gone" and "Dead and Gone (feat. Justin Timberlake)" are both
+    legitimate candidates on their own -- different videoIds, sometimes
+    different titles or artist credits -- but a recommendation set should
+    never hand back both. This runs on the whole candidate pool before
+    ranking/truncation/slotting, not after: collapsing post-truncation would
+    just leave a gap instead of letting the next-best distinct song in.
+    """
+    buckets: dict[str, list[str]] = {}
+    for vid, c in pool.items():
+        buckets.setdefault(_song_key(c.get("title") or "") or vid, []).append(vid)
+
+    collapsed: dict[str, dict[str, Any]] = {}
+    dropped = 0
+    for vids in buckets.values():
+        clusters: list[list[str]] = []
+        for vid in vids:
+            c = pool[vid]
+            artist = (c.get("artists") or [None])[0]
+            for cluster in clusters:
+                rep = pool[cluster[0]]
+                rep_artist = (rep.get("artists") or [None])[0]
+                if same_song(c.get("title"), artist, rep.get("title"), rep_artist):
+                    cluster.append(vid)
+                    break
+            else:
+                clusters.append([vid])
+
+        for cluster in clusters:
+            if len(cluster) == 1:
+                collapsed[cluster[0]] = pool[cluster[0]]
+                continue
+            best = max(cluster, key=lambda v: pool[v].get("score", 0))
+            collapsed[best] = pool[best]
+            dropped += len(cluster) - 1
+
+    return collapsed, dropped

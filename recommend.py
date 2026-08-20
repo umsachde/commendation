@@ -12,6 +12,7 @@ agreed *and* how well each song fits the mood, and finally shape the result
 into a sequence that moves (see arc.py).
 """
 
+import math
 from typing import Any, Iterable
 
 import arc as arc_module
@@ -24,6 +25,12 @@ import store
 
 SEED_COUNT = 6
 CANDIDATES_PER_SLOT = 12
+
+# How much of a requested count is allowed to be filler (unrated, or rated but
+# a poor fit) rather than a genuine mood match. Asking for 100 and getting 7
+# real matches shouldn't come back as 100 -- it should come back as 7 plus a
+# bounded amount of the best-available filler, honestly labelled as such.
+FLUFF_CAP_RATIO = 0.25
 ATLAS_NEIGHBOUR_LIMIT = 400
 
 # Bounding box for the SQL pre-filter before exact distances are computed.
@@ -344,6 +351,41 @@ def _tempo_note(report: dict[str, Any]) -> str:
     return "; ".join(parts) + "."
 
 
+def _is_genuine_match(song: dict[str, Any]) -> bool:
+    """A real mood label whose fit actually clears the unrated baseline --
+    as opposed to unrated filler, or a rated song that's a poor fit anyway."""
+    return bool(song["rated"]) and song["mood_fit"] is not None and song["mood_fit"] > arc_module.UNRATED_FIT
+
+
+def _cap_fluff(ordered: list[dict[str, Any]], requested: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Bound how much of the sequenced list is filler.
+
+    arc.sequence() fills every slot it can from whatever's left in the pool,
+    with no floor on quality -- asking for 100 with 7 real matches otherwise
+    comes back as 100, the other 93 being progressively worse guesses. Genuine
+    matches are always kept, in their arc order; filler is kept only up to
+    ceil(requested * FLUFF_CAP_RATIO), also in arc order, and the rest dropped.
+    """
+    fluff_cap = math.ceil(requested * FLUFF_CAP_RATIO)
+    kept: list[dict[str, Any]] = []
+    genuine = fluff_used = 0
+    for song in ordered:
+        if _is_genuine_match(song):
+            genuine += 1
+            kept.append(song)
+        elif fluff_used < fluff_cap:
+            fluff_used += 1
+            kept.append(song)
+
+    for slot, song in enumerate(kept):
+        song["slot"] = slot
+
+    return kept, {
+        "genuine": genuine, "requested": requested,
+        "fluff_cap": fluff_cap, "fluff_used": fluff_used,
+    }
+
+
 def build(
     yt: Any,
     conn: Any,
@@ -395,6 +437,13 @@ def build(
     # resurface one, and a caller may pass a narrower exclusion set.
     blocked = set(exclude) | {seed["videoId"] for seed in seeds}
     pool = {vid: c for vid, c in merged.items() if vid not in blocked}
+
+    pool, variants_collapsed = signals._collapse_variants(pool)
+    if variants_collapsed:
+        notes.append(
+            f"Collapsed {variants_collapsed} remix/feature variant(s) down to one per song."
+        )
+
     if not pool:
         return {
             "target": {k: round(v, 3) for k, v in target.items()},
@@ -403,6 +452,7 @@ def build(
             "arc": arc, "seeds": seeds,
             "notes": notes + ["No candidates survived the library exclusion."],
             "filters": {"language": {"applied": False}, "tempo": {"applied": False}},
+            "match_quality": {"genuine": 0, "requested": limit, "fluff_cap": math.ceil(limit * FLUFF_CAP_RATIO), "fluff_used": 0},
             "songs": [],
         }
 
@@ -451,6 +501,15 @@ def build(
     slot_targets = arc_module.targets(target, arc, limit)
     ordered = arc_module.sequence(shortlist, slot_targets)
 
+    ordered, match_quality = _cap_fluff(ordered, requested=limit)
+    if match_quality["genuine"] < limit:
+        notes.append(
+            f"Only {match_quality['genuine']} songs genuinely matched this mood "
+            f"(rated, with a real fit above the {arc_module.UNRATED_FIT:.2f} unrated baseline); "
+            f"capped filler at {match_quality['fluff_cap']} (25% of the {limit} requested), "
+            f"so {len(ordered)} were returned total."
+        )
+
     # Remember what we served. Without this, explain_recommendation knows a
     # song was recommended but not what it was.
     store.upsert_tracks(conn, ordered)
@@ -474,5 +533,6 @@ def build(
         ],
         "notes": notes,
         "filters": {"language": language_report, "tempo": tempo_report},
+        "match_quality": match_quality,
         "songs": ordered,
     }

@@ -117,6 +117,7 @@ from signals import (  # noqa: E402
     _gather_seed_candidates,
     _merge_and_score,
     _norm_track,
+    same_song,
 )
 
 def _liked_video_ids(yt: YTMusic) -> set[str]:
@@ -461,15 +462,20 @@ def recommend_from_song(
         merged = _filter_same_artist(merged, seed_artist_names or ([artist] if artist else []))
 
     exclude = _library_video_ids(yt)
-    ranked = _finalize(merged, exclude, limit * 12 if (language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo) else limit)
+    ranked, variants_collapsed = _finalize(merged, exclude, limit * 12 if (language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo) else limit)
 
-    return _apply_result_filters(
+    result = _apply_result_filters(
         ranked, seed_video_id=video_id, seed_title=song, seed_artist=artist,
         limit=limit, language=language, exclude_languages=exclude_languages,
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max, match_seed_tempo=match_seed_tempo,
         expand_across_language=expand_across_language, max_per_artist=max_per_artist,
     )
+    if variants_collapsed:
+        result["notes"].insert(
+            0, f"Collapsed {variants_collapsed} remix/feature variant(s) down to one per song."
+        )
+    return result
 
 
 @mcp.tool()
@@ -499,7 +505,8 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     merged = _merge_and_score(per_seed)
 
     exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
-    return _finalize(merged, exclude, limit)
+    songs, _ = _finalize(merged, exclude, limit)
+    return songs
 
 
 @mcp.tool()
@@ -518,6 +525,10 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
     actually found rather than padding the list. Check `found` vs
     `requested` in the result to see whether it fell short.
 
+    Remix/feature variants of the same underlying song (e.g. a track and its
+    "(feat. ...)" credit under a different videoId) count once, not once
+    per variant -- see `variants_collapsed` in the result.
+
     The library exclusion set is cached for speed; newly liked songs are
     always honoured, but call refresh_library() after adding songs to a
     playlist by other means.
@@ -525,17 +536,26 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
     yt = _client()
     resolved = _resolve_artist(yt, artist)
     if resolved is None or not resolved.get("browseId"):
-        return {"artist": None, "requested": limit, "found": 0, "songs": []}
+        return {"artist": None, "requested": limit, "found": 0, "variants_collapsed": 0, "songs": []}
 
     catalog = _artist_song_catalog(yt, resolved["browseId"])
     exclude = _library_video_ids(yt)
 
     songs: list[dict[str, Any]] = []
     seen: set[str] = set()
+    variants_collapsed = 0
     for item in catalog:
         track = _norm_track(item)
         vid = track["videoId"]
         if not vid or vid in exclude or vid in seen:
+            continue
+        track_artist = (track.get("artists") or [None])[0]
+        if any(
+            same_song(track["title"], track_artist, s["title"], (s.get("artists") or [None])[0])
+            for s in songs
+        ):
+            seen.add(vid)
+            variants_collapsed += 1
             continue
         seen.add(vid)
         songs.append(track)
@@ -546,6 +566,7 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
         "artist": resolved.get("artist"),
         "requested": limit,
         "found": len(songs),
+        "variants_collapsed": variants_collapsed,
         "songs": songs,
     }
 
@@ -635,10 +656,17 @@ def recommend_for_mood(
     simply not scored on tempo -- Deezer has no tempo for much of the
     non-English catalogue, so dropping them would delete whole languages.
 
+    `limit` is a ceiling, not a guarantee. If fewer than `limit` songs genuinely
+    fit the mood (rated, with a real fit -- not just an unrated placeholder
+    score), the shortfall is NOT padded with weak filler to hit the number.
+    Filler is capped at 25% of `limit`: asking for 100 with 7 genuine matches
+    returns 32 (7 + 25), not 100. See `match_quality` in the result for the
+    genuine/filler breakdown, and `notes` for the human-readable version.
+
     The result carries `target` (the mood aimed at), `target_origin` (where it
     came from), `seeds` (which of their songs it grew from), `notes` (caveats
-    worth repeating to the user) and `songs`, each with its slot, mood fit and
-    which signals surfaced it.
+    worth repeating to the user), `match_quality` (genuine vs. filler counts)
+    and `songs`, each with its slot, mood fit and which signals surfaced it.
     """
     import recommend
     import store as _s
