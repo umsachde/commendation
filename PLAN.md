@@ -107,10 +107,13 @@ relative to the open questions below:
 
 ## v3 — Multi-provider support (Spotify)
 
-Not started. Open design questions for whichever agent picks this up:
+**YouTube Music side done (2026-08-20).** `signals.py`/`server.py`'s live tool-call path no longer talks to `ytmusicapi` at all — `_client()` returns a `ytmusic_client.YTMusicClient`, a synchronous facade that spawns the sibling `ytmusic-mcp` server as an MCP subprocess and calls its tools (`search_music`, `get_playlists`, `get_playlist_tracks`, `get_watch_playlist`, `get_song_related`, `get_artist`, `get_history` — the last three were added to `ytmusic-mcp` in this session, it previously only exposed playlist-management tools). The facade exposes the exact method names/shapes `ytmusicapi.YTMusic` used to (`get_watch_playlist`, `get_playlist`, etc.), so `_gather_seed_candidates`, `_merge_and_score`, `_finalize`, `recommend.build`, `sense.read_mood` and everything downstream needed **zero changes** — the seam was already exactly `_client()`. re-com now holds no YouTube Music credential of any kind; `ytmusic-mcp` owns auth entirely. `RECOM_AUTH_PATH`/`headers_auth.json`/`setup_auth*.py` still exist but now only serve the **offline** maintenance scripts (`build_atlas.py`, `label_library.py`, `build_genres.py`, `snapshot_history.py`, `quality_check.py`), which are out of the live request path and were deliberately left untouched — see README's Setup section.
 
-- **Provider abstraction.** `_gather_seed_candidates`, `_liked_video_ids`, etc. are currently written directly against `ytmusicapi`. v3 needs some kind of provider interface (e.g. a `Provider` protocol with `get_seed_candidates`, `get_liked_ids`, `get_playlist_tracks` methods) so the scoring/ranking/exclusion logic in `_merge_and_score` / `_finalize` — which is already provider-agnostic — can run over either backend unchanged.
-- **Auth is a bigger difference than it looks.** YouTube Music auth here is a copy-pasted browser header (see README). Spotify uses real OAuth (client ID/secret, redirect URI, refresh token) via the Spotify Web API — a materially different setup flow, likely its own `scripts/setup_auth_spotify.py`.
+Open design questions for whichever agent picks up Spotify:
+
+- **Provider abstraction, generalized.** The YouTube Music work above is the concrete instance of the pattern: a `Provider` should be "an MCP-client facade over a sibling `*-mcp` server that owns that backend's auth," not a bespoke Python class re-com authenticates itself. A `SpotifyProvider` should spawn/talk to a future `spotify-mcp` server the same way `YTMusicClient` talks to `ytmusic-mcp` — re-com stays credential-free for Spotify too. `ytmusic_client.YTMusicClient` is the reference shape to copy (same connect/call/close plumbing, different tool names and unwrap logic).
+- **Signal-shape matching is real work per provider.** `YTMusicClient`'s methods intentionally mirror `ytmusicapi.YTMusic`'s exact signatures/return shapes so the rest of re-com didn't need to change. A `SpotifyProvider` won't have that luxury — Spotify's actual endpoints (top-tracks, related-artists, recommendations) don't line up 1:1 with YouTube Music's (radio, related, artist expansion), so either `spotify-mcp`'s tools need to be shaped to fit `_gather_seed_candidates`'s expectations, or `_gather_seed_candidates` needs to grow a real `Provider` protocol with a shared, backend-agnostic seed-signal contract instead of assuming `ytmusicapi`-shaped methods. Worth deciding which before writing `spotify-mcp`.
+- **Auth is a bigger difference than it looks, but it's now someone else's problem.** YouTube Music auth is a copy-pasted browser header; Spotify uses real OAuth (client ID/secret, redirect URI, refresh token) via the Spotify Web API. Since a future `spotify-mcp` would own that entirely (mirroring `ytmusic-mcp`), re-com itself doesn't need to care which flow it is — but `spotify-mcp` will need its own `scripts/setup_auth_spotify.py`-equivalent.
 - **Signal parity isn't guaranteed.** Spotify's Web API has artist top-tracks and (historically) a recommendations/related-artists endpoint, but Spotify has been actively deprecating/restricting several discovery endpoints for newer app registrations — check current API access levels before assuming parity with the YouTube Music 3-signal design above.
 - **Tool contract question:** does `recommend_from_song`/`recommend_from_playlist` gain a `provider` argument, or does provider selection happen at the MCP-server-instance level (e.g. a separately configured `re-com-spotify` server)? Whichever it is, a single call should almost certainly stay within one provider — cross-provider merging (e.g. seeding from a YouTube Music playlist but recommending Spotify tracks) is out of scope unless a future agent has a concrete reason to want it.
 - **IDs are provider-specific.** `video_id` is currently baked into the tool signatures and output (`videoId` field) as YouTube Music terminology. This session deliberately left that rename undone (see git history/PLAN discussion around 2026-08-19) rather than doing it speculatively — but it's the first thing to revisit once a second provider actually exists, since Spotify track IDs/URIs aren't YouTube video IDs.
@@ -185,3 +188,35 @@ Music, the same way Liked Music is already a hard exclusion.
   suite can never read or write the developer's real cache. Coverage of the new code is complete.
 - Known pre-existing coverage gaps, untouched by this change: two branches in `_artist_names_match` /
   `_filter_same_artist`, both introduced with `same_artist_only` in commit 128878f.
+
+**2026-08-20 session — v3, YouTube Music side: re-com no longer holds any YouTube Music credential.**
+- User-requested: re-com should rely on the sibling `ytmusic-mcp` server for everything YouTube-Music-related
+  and know nothing about YouTube login. New `ytmusic_client.py`: a synchronous facade (`YTMusicClient`) that
+  spawns `ytmusic-mcp` as an MCP subprocess (stdio) and exposes the same method names/shapes
+  `ytmusicapi.YTMusic` used to (`search`, `get_playlist`, `get_library_playlists`, `get_watch_playlist`,
+  `get_song_related`, `get_artist`, `get_history`) so every caller downstream of `_client()` needed zero
+  changes.
+- `ytmusic-mcp` gained three new tools it didn't have (`get_watch_playlist`, `get_song_related`, `get_artist`)
+  plus a `limit` param on `get_playlists` (previously hardcoded to ytmusicapi's default of 25, which silently
+  truncated the library-cache rebuild). 30 tests there, all passing.
+- `server.py`: removed `ytmusicapi`/`YTMusicError` imports, `AUTH_PATH`/`AUTH_HELP`, and all the
+  auth/JSON-decode/HTTP-401/403/429-specific branches from `handle_errors` — `ytmusic-mcp` already translates
+  those into one clear `YTMusicMCPError`, so `handle_errors` just passes its message through. `signals.py`'s
+  `_SIGNAL_ERRORS` narrowed from `(YTMusicError, requests.exceptions.RequestException)` to
+  `(YTMusicMCPError,)` for the same reason.
+- Verified live end-to-end against the real account through the new path: `recommend_from_song`,
+  `recommend_for_mood`, and `scripts/test_recommend.py` (rewritten to talk to `ytmusic-mcp` instead of opening
+  `headers_auth.json` itself) all work.
+- **Deliberately out of scope for this session:** the *offline* maintenance scripts (`build_atlas.py`,
+  `label_library.py`, `build_genres.py`, `build_tempo.py`, `snapshot_history.py`, `quality_check.py`,
+  `setup_auth.py`/`setup_auth_from_file.py`) still construct `ytmusicapi.YTMusic(RECOM_AUTH_PATH)` directly.
+  They're CLI tools the user runs themselves, not part of the live tool-call path, and converting them would
+  mean routing bulk/one-off indexing operations through individual MCP tool calls for no live-request benefit.
+  `atlas.py`, `lyrics.py`, `taxonomy.py`, `judge.py`, `label.py` (the modules those scripts call into) are
+  untouched and still import `ytmusicapi.exceptions` directly for that reason.
+- Tests: 288 passing (server.py 93% line coverage). `tests/test_server.py`'s `handle_errors` tests rewritten
+  for the simplified version; its `_FakeYT`/signal-failure tests now raise `YTMusicMCPError` instead of
+  `ytmusicapi`'s exception types. Two tests in `tests/test_v2.py` (`recommend.build`/`recommend.bridge_expand`
+  surviving a dead seed) updated the same way; everything else in `test_v2.py` that raises `YTMusicError`
+  tests `atlas.py`/`lyrics.py`/`label.py` directly and was untouched since those modules didn't change.
+- README and this file updated in the same session.

@@ -1,7 +1,11 @@
 """
-Standalone smoke test: confirms headers_auth.json works and that
-recommend_from_song produces sane, liked-excluded results, without
-touching the MCP layer at all.
+Standalone smoke test: confirms re-com can reach ytmusic-mcp and that
+recommend_from_song produces sane, liked-excluded results, without touching
+Claude Code's MCP layer at all.
+
+Needs RECOM_YTMUSIC_MCP_COMMAND / RECOM_YTMUSIC_MCP_ARGS set (see README) so
+re-com knows how to reach ytmusic-mcp, the same env vars `claude mcp add`
+uses.
 
     python scripts/test_recommend.py
 """
@@ -11,8 +15,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ytmusicapi import YTMusic
-
 from server import _client, _liked_video_ids, recommend_from_song
 
 SEED_QUERY = "Daft Punk One More Time"
@@ -20,10 +22,10 @@ SEED_QUERY = "Daft Punk One More Time"
 
 def main() -> int:
     try:
-        yt = YTMusic("headers_auth.json")
+        yt = _client()
     except Exception as e:
-        print(f"Failed to load headers_auth.json: {e}")
-        print("Run scripts/setup_auth.py first.")
+        print(f"Failed to reach ytmusic-mcp: {e}")
+        print("Check RECOM_YTMUSIC_MCP_COMMAND / RECOM_YTMUSIC_MCP_ARGS and that ytmusic-mcp is authenticated.")
         return 1
 
     results = yt.search(SEED_QUERY, filter="songs", limit=1)
@@ -34,12 +36,13 @@ def main() -> int:
     seed = results[0]
     print(f"Seed: {seed['title']} — {', '.join(a['name'] for a in seed.get('artists') or [])}")
 
-    recs = recommend_from_song(seed["videoId"], limit=10)
+    result = recommend_from_song(seed["videoId"], limit=10)
+    recs = result["songs"]
     if not recs:
         print("No recommendations returned -- something's off.")
         return 1
 
-    liked = _liked_video_ids(_client())
+    liked = _liked_video_ids(yt)
     leaked = [r for r in recs if r["videoId"] in liked]
 
     print(f"\nGot {len(recs)} recommendations:")

@@ -9,18 +9,10 @@ import json
 import time
 
 import pytest
-import requests
-from ytmusicapi.exceptions import (
-    YTMusicError,
-    YTMusicGatedError,
-    YTMusicServerError,
-    YTMusicUserError,
-)
+from ytmusic_client import YTMusicMCPError
 
 import server
 from server import (
-    AUTH_HELP,
-    AUTH_PATH,
     _artist_song_catalog,
     _build_library_video_ids,
     _finalize,
@@ -265,7 +257,7 @@ def test_library_video_ids_skips_playlist_that_fails_to_fetch():
     yt = _FakeYT(
         playlists={
             "LM": {"tracks": []},
-            "PL1": YTMusicError("gone"),
+            "PL1": YTMusicMCPError("gone"),
             "PL2": {"tracks": [{"videoId": "ok1"}]},
         },
         library_playlists=[{"playlistId": "PL1"}, {"playlistId": "PL2"}],
@@ -300,7 +292,7 @@ def test_artist_song_catalog_prefers_full_songs_playlist():
 def test_artist_song_catalog_falls_back_to_preview_when_full_fetch_fails():
     yt = _FakeYT(
         artists={"UC1": {"songs": {"browseId": "VLPL1", "results": [{"videoId": "preview1"}]}}},
-        playlists={"VLPL1": YTMusicError("gone")},
+        playlists={"VLPL1": YTMusicMCPError("gone")},
     )
     catalog = _artist_song_catalog(yt, "UC1")
     assert [t["videoId"] for t in catalog] == ["preview1"]
@@ -492,7 +484,7 @@ def test_gather_seed_candidates_signal_failure_is_skipped_not_fatal():
             "related": "REL_BROWSE",
         }
     }
-    related_sections = {"REL_BROWSE": YTMusicError("related signal down")}
+    related_sections = {"REL_BROWSE": YTMusicMCPError("related signal down")}
     artists = {"artist1": {"songs": {"results": [{"videoId": "artistsong1", "title": "Artist Song"}]}, "related": {"results": []}}}
     yt = _FakeYT(watch=watch, related_sections=related_sections, artists=artists)
 
@@ -504,7 +496,7 @@ def test_gather_seed_candidates_signal_failure_is_skipped_not_fatal():
 
 def test_gather_seed_candidates_total_watch_failure_returns_empty():
     seed = "seed1"
-    yt = _FakeYT(watch={seed: requests.exceptions.RequestException("network down")})
+    yt = _FakeYT(watch={seed: YTMusicMCPError("network down")})
     assert _gather_seed_candidates(yt, seed) == {}
 
 
@@ -526,7 +518,7 @@ def test_gather_seed_candidates_seed_artist_lookup_fails_radio_still_returned():
             "related": None,
         }
     }
-    yt = _FakeYT(watch=watch, artists={"artist1": YTMusicError("artist page down")})
+    yt = _FakeYT(watch=watch, artists={"artist1": YTMusicMCPError("artist page down")})
 
     found = _gather_seed_candidates(yt, seed)
 
@@ -569,7 +561,7 @@ def test_gather_seed_candidates_related_artist_lookup_failure_is_skipped():
             "songs": {"results": [{"videoId": "artistsong1", "title": "Artist Song"}]},
             "related": {"results": [{"browseId": "relartist1"}]},
         },
-        "relartist1": YTMusicError("related artist page down"),
+        "relartist1": YTMusicMCPError("related artist page down"),
     }
     yt = _FakeYT(watch=watch, artists=artists)
 
@@ -589,95 +581,23 @@ def test_handle_errors_passes_through_success():
     assert fn() == 42
 
 
-def test_handle_errors_file_not_found():
+def test_handle_errors_ytmusic_mcp_error_passes_through_message():
+    # ytmusic-mcp already turns auth/rate-limit/gated/network failures into a
+    # clear message -- handle_errors just needs to not mangle it.
     @handle_errors
     def fn():
-        raise FileNotFoundError()
-
-    with pytest.raises(RuntimeError, match="setup_auth_from_file.py"):
-        fn()
-    with pytest.raises(RuntimeError, match=AUTH_PATH.replace(".", r"\.")):
-        fn()
-
-
-def test_handle_errors_json_decode_error():
-    @handle_errors
-    def fn():
-        raise json.JSONDecodeError("bad", "doc", 0)
-
-    with pytest.raises(RuntimeError, match="unexpected response"):
-        fn()
-
-
-def test_handle_errors_server_error_401_maps_to_auth_help():
-    @handle_errors
-    def fn():
-        raise YTMusicServerError("HTTP 401 Unauthorized")
-
-    with pytest.raises(RuntimeError, match=AUTH_HELP.split(".")[0]):
-        fn()
-
-
-def test_handle_errors_server_error_403_maps_to_auth_help():
-    @handle_errors
-    def fn():
-        raise YTMusicServerError("HTTP 403 Forbidden")
-
-    with pytest.raises(RuntimeError, match=AUTH_HELP.split(".")[0]):
-        fn()
-
-
-def test_handle_errors_server_error_429_maps_to_rate_limit_message():
-    @handle_errors
-    def fn():
-        raise YTMusicServerError("HTTP 429 Too Many Requests")
+        raise YTMusicMCPError("YouTube Music is rate-limiting requests right now. Wait a bit and try again.")
 
     with pytest.raises(RuntimeError, match="rate-limiting"):
         fn()
 
 
-def test_handle_errors_other_server_error():
+def test_handle_errors_value_error():
     @handle_errors
     def fn():
-        raise YTMusicServerError("HTTP 500 Internal Server Error")
+        raise ValueError("unknown arc 'sideways'")
 
-    with pytest.raises(RuntimeError, match="YouTube Music server error"):
-        fn()
-
-
-def test_handle_errors_gated_error():
-    @handle_errors
-    def fn():
-        raise YTMusicGatedError("interaction required")
-
-    with pytest.raises(RuntimeError, match="gated/restricted"):
-        fn()
-
-
-def test_handle_errors_user_error():
-    @handle_errors
-    def fn():
-        raise YTMusicUserError("bad usage")
-
-    with pytest.raises(RuntimeError, match="bad usage"):
-        fn()
-
-
-def test_handle_errors_generic_ytmusic_error():
-    @handle_errors
-    def fn():
-        raise YTMusicError("something else")
-
-    with pytest.raises(RuntimeError, match="YouTube Music error"):
-        fn()
-
-
-def test_handle_errors_network_error():
-    @handle_errors
-    def fn():
-        raise requests.exceptions.ConnectionError("no route to host")
-
-    with pytest.raises(RuntimeError, match="Network error"):
+    with pytest.raises(RuntimeError, match="unknown arc"):
         fn()
 
 
@@ -995,7 +915,7 @@ def test_library_cache_top_up_uses_a_bounded_fetch_not_the_whole_playlist():
 def test_library_cache_top_up_failure_falls_back_to_cached_ids():
     yt = _cache_fake()
     _library_video_ids(yt)
-    yt._playlists["LM"] = YTMusicError("transient")
+    yt._playlists["LM"] = YTMusicMCPError("transient")
 
     # Degraded, not broken: a slightly older set beats no recommendation.
     assert _library_video_ids(yt) == {"liked1", "pl1song1"}

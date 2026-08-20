@@ -3,7 +3,9 @@
 Combines multiple independent discovery signals (radio, related content,
 artist catalog expansion) instead of trusting a single algorithm, and always
 excludes anything already in the user's library. v1 is backed by YouTube
-Music (via ytmusicapi); see PLAN.md for planned multi-provider support.
+Music, reached entirely through the sibling `ytmusic-mcp` server (see
+ytmusic_client.py) -- re-com holds no YouTube Music credentials of its own.
+See PLAN.md for planned multi-provider support.
 """
 
 import functools
@@ -14,16 +16,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-import requests
 from mcp.server.mcpserver import MCPServer
-from ytmusicapi import YTMusic
-from ytmusicapi.exceptions import YTMusicError, YTMusicGatedError, YTMusicServerError, YTMusicUserError
 
-AUTH_PATH = os.environ.get("RECOM_AUTH_PATH", "headers_auth.json")
-AUTH_HELP = (
-    f"YouTube Music auth at {AUTH_PATH} looks invalid or expired. "
-    "Re-run scripts/setup_auth_from_file.py to refresh it (see README)."
-)
+from ytmusic_client import YTMusicClient, YTMusicMCPError
 
 # Rebuilding the library exclusion set costs ~20s of API calls (Liked Music
 # plus every playlist), and every tool needs it. It's cached on disk instead;
@@ -33,12 +28,12 @@ CACHE_PATH = Path(os.environ.get("RECOM_CACHE_PATH") or _DEFAULT_CACHE_PATH)
 # Seconds a cached exclusion set stays usable. <= 0 disables caching entirely.
 CACHE_TTL = int(os.environ.get("RECOM_CACHE_TTL", 6 * 60 * 60))
 # How many of the most recently liked songs to re-check on every cache hit.
-# ytmusicapi pages this, so the real count returned is typically ~2x.
+# ytmusic-mcp/ytmusicapi pages this, so the real count returned is typically ~2x.
 RECENT_LIKES_LIMIT = 100
 
 mcp = MCPServer("re-com")
 
-_yt: YTMusic | None = None
+_yt: YTMusicClient | None = None
 _store_conn = None
 
 
@@ -52,48 +47,32 @@ def _store():
     return _store_conn
 
 
-def _client() -> YTMusic:
+def _client() -> YTMusicClient:
+    """The (persistent, lazily-started) connection to ytmusic-mcp.
+
+    re-com never holds YouTube Music credentials -- ytmusic-mcp owns auth
+    entirely; see ytmusic_client.py.
+    """
     global _yt
     if _yt is None:
-        _yt = YTMusic(AUTH_PATH)
+        _yt = YTMusicClient()
     return _yt
 
 
 def handle_errors(fn):
-    """Translate ytmusicapi/network failures into clear, actionable messages.
+    """Translate ytmusic-mcp/argument-validation failures into clean tool errors.
 
-    Expired or malformed auth headers don't always raise a typed exception --
-    a bad session can make YouTube's frontend return an HTML error page where
-    ytmusicapi expects JSON, which surfaces as a raw JSONDecodeError.
+    ytmusic-mcp already turns auth/rate-limit/gated/network failures into
+    clear, actionable messages (YTMusicMCPError) -- this just keeps those from
+    arriving as raw tracebacks, and does the same for our own validation.
     """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except FileNotFoundError as e:
-            raise RuntimeError(
-                f"{AUTH_PATH} not found. Run scripts/setup_auth_from_file.py to authenticate."
-            ) from e
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"YouTube Music returned an unexpected response. {AUTH_HELP}") from e
-        except YTMusicGatedError as e:
-            raise RuntimeError(f"This content is gated/restricted and unavailable: {e}") from e
-        except YTMusicServerError as e:
-            msg = str(e)
-            if "HTTP 401" in msg or "HTTP 403" in msg:
-                raise RuntimeError(AUTH_HELP) from e
-            if "HTTP 429" in msg:
-                raise RuntimeError(
-                    "YouTube Music is rate-limiting requests right now. Wait a bit and try again."
-                ) from e
-            raise RuntimeError(f"YouTube Music server error: {msg}") from e
-        except YTMusicUserError as e:
+        except YTMusicMCPError as e:
             raise RuntimeError(str(e)) from e
-        except YTMusicError as e:
-            raise RuntimeError(f"YouTube Music error: {e}") from e
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Network error reaching YouTube Music: {e}") from e
         except ValueError as e:
             # Our own argument validation (e.g. an unknown arc name). These are
             # actionable messages already -- they just need to arrive as a
@@ -120,14 +99,14 @@ from signals import (  # noqa: E402
     same_song,
 )
 
-def _liked_video_ids(yt: YTMusic) -> set[str]:
+def _liked_video_ids(yt: YTMusicClient) -> set[str]:
     # get_liked_songs() defaults to only the most recent 100 items -- not
     # enough for a real library. get_playlist("LM", limit=None) fetches all.
     liked = yt.get_playlist("LM", limit=None)
     return {t["videoId"] for t in liked.get("tracks", []) if t.get("videoId")}
 
 
-def _recent_liked_video_ids(yt: YTMusic) -> set[str]:
+def _recent_liked_video_ids(yt: YTMusicClient) -> set[str]:
     """The most recently liked songs only -- one page, ~1s instead of ~7s.
 
     Newly liked songs land at the top of Liked Music, so this is what keeps a
@@ -137,7 +116,7 @@ def _recent_liked_video_ids(yt: YTMusic) -> set[str]:
     return {t["videoId"] for t in recent.get("tracks", []) if t.get("videoId")}
 
 
-def _build_library_video_ids(yt: YTMusic) -> set[str]:
+def _build_library_video_ids(yt: YTMusicClient) -> set[str]:
     """Full rebuild: Liked Music plus every playlist the user owns. ~20s."""
     ids = set(_liked_video_ids(yt))
     for pl in yt.get_library_playlists(limit=None):
@@ -190,7 +169,7 @@ def _write_cache(ids: set[str]) -> float:
     return fetched_at
 
 
-def _library_video_ids(yt: YTMusic, force_refresh: bool = False) -> set[str]:
+def _library_video_ids(yt: YTMusicClient, force_refresh: bool = False) -> set[str]:
     """Every videoId already in the user's library: Liked Music plus every
     playlist they own, not just one seed playlist.
 
@@ -217,14 +196,14 @@ def _library_video_ids(yt: YTMusic, force_refresh: bool = False) -> set[str]:
     return ids
 
 
-def _resolve_artist(yt: YTMusic, artist: str) -> dict[str, Any] | None:
+def _resolve_artist(yt: YTMusicClient, artist: str) -> dict[str, Any] | None:
     """Resolve a free-text artist name to a search result carrying its
     channelId (`browseId`), or None if nothing matched."""
     results = yt.search(artist, filter="artists", limit=1)
     return results[0] if results else None
 
 
-def _resolve_song_video_id(yt: YTMusic, song: str, artist: str | None = None) -> str | None:
+def _resolve_song_video_id(yt: YTMusicClient, song: str, artist: str | None = None) -> str | None:
     """Resolve a free-text song title (optionally with an artist name) to a
     videoId via search, so callers don't need to pre-resolve one themselves.
 
@@ -245,7 +224,7 @@ def _resolve_song_video_id(yt: YTMusic, song: str, artist: str | None = None) ->
     return results[0].get("videoId")
 
 
-def _artist_song_catalog(yt: YTMusic, channel_id: str) -> list[dict[str, Any]]:
+def _artist_song_catalog(yt: YTMusicClient, channel_id: str) -> list[dict[str, Any]]:
     """Pull an artist's actual song catalog -- not similarity candidates.
 
     get_artist()'s own "songs" section is just a short top-songs preview.

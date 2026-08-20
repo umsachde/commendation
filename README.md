@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that recommends **new** songs �
 
 It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
 
-**Backend: YouTube Music (v1).** re-com is designed as a general recommendation engine, not tied to one service — v1 is built entirely against YouTube Music (via `ytmusicapi`). Spotify support is planned as a second backend; see `PLAN.md`'s "v3 — Multi-provider support" section for the design questions around that.
+**Backend: YouTube Music (v1).** re-com is designed as a general recommendation engine, not tied to one service. v1 is built against YouTube Music, but re-com itself holds **no YouTube Music credentials of any kind** — every call to YouTube Music goes through the sibling [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) server, which re-com spawns as an MCP subprocess and which owns auth entirely (see [Setup](#2-connect-to-ytmusic-mcp) below). Spotify support is planned as a second backend, following the same shape — a `spotify-mcp` server owning Spotify auth, with re-com talking to it the same way; see `PLAN.md`'s "v3 — Multi-provider support" section for the open design questions.
 
 ## Tools
 
@@ -320,48 +320,31 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 2. Authenticate (YouTube Music)
+### 2. Connect to ytmusic-mcp
 
-There's no official YouTube Music API, so `ytmusicapi` authenticates by reusing headers from your logged-in browser session.
+re-com holds no YouTube Music credentials of its own — every call to YouTube Music goes through the sibling [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) server, which re-com spawns as a subprocess over MCP and which owns login entirely.
 
-1. Open [music.youtube.com](https://music.youtube.com) in **Firefox** (recommended — its raw-header copy is more reliable than Chrome's) while logged in.
-2. Open DevTools (`Cmd+Option+I` / `F12`) → **Network** tab → filter by `browse`.
-3. Click into a playlist, or reload the page, to trigger a `browse` POST request.
-4. Click that request → **Headers** tab → toggle **Raw headers** → select and copy the whole block.
-5. Paste it into a new file named `raw_headers.txt` in the project root and save.
-6. Run:
-   ```bash
-   python scripts/setup_auth_from_file.py
-   ```
-   This writes `headers_auth.json` and deletes `raw_headers.txt`.
-
-Alternatively, `python scripts/setup_auth.py` does the same thing via an interactive terminal prompt instead of a file, if you prefer to paste directly.
-
-**`headers_auth.json` is equivalent to your logged-in session — never commit it or share it.** It's already gitignored.
-
-Verify auth works and sanity-check recommendations before going further:
-
-```bash
-python scripts/test_recommend.py
-```
-
-These headers expire/rotate periodically. If tools start failing with an auth error, redo this step.
-
-### 3. Add to Claude Code
+1. Set up `ytmusic-mcp` and authenticate it (see that project's own README) — this is the *only* place YouTube Music credentials live.
+2. Point re-com at it via two env vars: `RECOM_YTMUSIC_MCP_COMMAND` (its interpreter) and `RECOM_YTMUSIC_MCP_ARGS` (its `server.py` path).
 
 ```bash
 claude mcp add re-com -s user \
-  -e RECOM_AUTH_PATH="$(pwd)/headers_auth.json" \
+  -e RECOM_YTMUSIC_MCP_COMMAND="/path/to/ytmusic-mcp/.venv/bin/python" \
+  -e RECOM_YTMUSIC_MCP_ARGS="/path/to/ytmusic-mcp/server.py" \
   -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
 ```
 
-`-s user` makes it available in any Claude Code session, not just this directory. Use absolute paths for the python interpreter, `server.py`, and `RECOM_AUTH_PATH` since the server can be launched from any working directory.
+`-s user` makes it available in any Claude Code session, not just this directory. Use absolute paths throughout, since the server can be launched from any working directory.
 
-For other MCP clients (Claude Desktop, etc.), point them at the same command and env var using their respective config format.
+For other MCP clients (Claude Desktop, etc.), point them at the same command and env vars using their respective config format.
+
+If `ytmusic-mcp`'s auth expires or rotates, tool calls fail with a clear message pointing at re-authenticating *there* — re-com has nothing of its own to re-run.
+
+**Offline maintenance scripts still authenticate directly.** `scripts/build_atlas.py`, `scripts/label_library.py`, `scripts/build_genres.py`, `scripts/build_tempo.py`, `scripts/snapshot_history.py`, and `scripts/quality_check.py` are indexing/labelling jobs you run yourself from the command line, not part of the live tool-call path — they still use `ytmusicapi` directly and need their own `headers_auth.json` (see `scripts/setup_auth_from_file.py` / `scripts/setup_auth.py`, and `RECOM_AUTH_PATH`). That's a separate, unrelated credential from `ytmusic-mcp`'s.
 
 ## Testing
 
-Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, library-cache behaviour (hits, misses, expiry, corruption, top-up, write failures), artist/song search resolution, error translation, and every tool end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake YTMusic client. No network access or `headers_auth.json` required. A `conftest.py` fixture redirects the library cache to a temp path for every test, so runs never touch your real cache.
+Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, library-cache behaviour (hits, misses, expiry, corruption, top-up, write failures), artist/song search resolution, error translation, and every tool end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake client matching `ytmusic_client.YTMusicClient`'s surface. No network access, `ytmusic-mcp`, or any YouTube Music credential required. A `conftest.py` fixture redirects the library cache to a temp path for every test, so runs never touch your real cache.
 
 ```bash
 pip install -e ".[dev]"
@@ -374,11 +357,11 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-197 tests, 97% line coverage across the whole project. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end. What remains uncovered is `_client()`'s real `YTMusic()` construction and the `if __name__ == "__main__"` entrypoints, neither meaningfully testable without a live auth session.
+288 tests, 93% line coverage across the whole project. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end. What remains uncovered is `_client()`'s real `YTMusicClient()` construction (which actually spawns `ytmusic-mcp`) and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live `ytmusic-mcp` connection.
 
 `conftest.py` redirects both the library cache and the SQLite store to temp paths for every test, so runs never touch your real data.
 
-`scripts/test_recommend.py` is a separate, complementary smoke test that hits your real account (see Setup step 2) to sanity-check that auth and live recommendations actually work.
+`scripts/test_recommend.py` is a separate, complementary smoke test that talks to a real, running `ytmusic-mcp` (see Setup step 2) to sanity-check that the connection and live recommendations actually work.
 
 ## How recommendations are ranked
 
@@ -396,10 +379,8 @@ Liked Music and every playlist in your library are excluded last, always, as a h
 
 Tool calls translate common failure modes into clear messages instead of raw tracebacks:
 
-- Missing/expired/malformed auth → tells you to rerun `scripts/setup_auth_from_file.py`.
-- Rate limiting (HTTP 429) → tells you to wait and retry.
-- Gated/restricted content → reported as unavailable rather than crashing.
-- Network errors → reported directly.
+- Missing/expired/malformed YouTube Music auth, rate limiting, gated/restricted content, and network errors are all translated by `ytmusic-mcp` itself (re-com has no auth of its own to point at) — its message tells you what to do, e.g. re-authenticate *there*.
+- If `ytmusic-mcp` isn't reachable at all (not configured, or the subprocess won't start), re-com says so plainly rather than hanging.
 - If an individual signal (radio, related, or artist expansion) fails for a given seed, that signal is silently skipped for that seed rather than failing the whole recommendation.
 
 ## License

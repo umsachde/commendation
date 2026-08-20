@@ -9,6 +9,8 @@ import time
 import pytest
 from ytmusicapi.exceptions import YTMusicError, YTMusicServerError
 
+from ytmusic_client import YTMusicMCPError
+
 import arc
 import atlas
 import judge
@@ -854,7 +856,7 @@ def test_build_survives_a_seed_whose_signals_all_fail(db):
 
     class _Broken(_BuildYT):
         def get_watch_playlist(self, videoId, limit=25, radio=True):
-            raise YTMusicError("dead")
+            raise YTMusicMCPError("dead")
 
     result = recommend.build(_Broken({}), db, exclude=set(), feeling="heartbroken", limit=3)
     assert result["songs"] == []
@@ -1461,7 +1463,7 @@ def test_bridge_expand_survives_a_dead_bridge(db):
 
     class _Dead(_BuildYT):
         def get_watch_playlist(self, videoId, limit=25, radio=True):
-            raise YTMusicError("gone")
+            raise YTMusicMCPError("gone")
 
     survivors = [{"videoId": "eng1", "title": "Eng One", "artists": ["Kendrick"], "base_score": 2}]
     out, added = recommend.bridge_expand(
