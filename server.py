@@ -19,7 +19,7 @@ from mcp.server.mcpserver import MCPServer
 from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicError, YTMusicGatedError, YTMusicServerError, YTMusicUserError
 
-AUTH_PATH = os.environ.get("COMMENDATION_AUTH_PATH", "headers_auth.json")
+AUTH_PATH = os.environ.get("RECOM_AUTH_PATH", "headers_auth.json")
 AUTH_HELP = (
     f"YouTube Music auth at {AUTH_PATH} looks invalid or expired. "
     "Re-run scripts/setup_auth_from_file.py to refresh it (see README)."
@@ -28,15 +28,15 @@ AUTH_HELP = (
 # Rebuilding the library exclusion set costs ~20s of API calls (Liked Music
 # plus every playlist), and every tool needs it. It's cached on disk instead;
 # see _library_video_ids for how staleness is bounded.
-_DEFAULT_CACHE_PATH = Path.home() / ".commendation" / "library_cache.json"
-CACHE_PATH = Path(os.environ.get("COMMENDATION_CACHE_PATH") or _DEFAULT_CACHE_PATH)
+_DEFAULT_CACHE_PATH = Path.home() / ".recom" / "library_cache.json"
+CACHE_PATH = Path(os.environ.get("RECOM_CACHE_PATH") or _DEFAULT_CACHE_PATH)
 # Seconds a cached exclusion set stays usable. <= 0 disables caching entirely.
-CACHE_TTL = int(os.environ.get("COMMENDATION_CACHE_TTL", 6 * 60 * 60))
+CACHE_TTL = int(os.environ.get("RECOM_CACHE_TTL", 6 * 60 * 60))
 # How many of the most recently liked songs to re-check on every cache hit.
 # ytmusicapi pages this, so the real count returned is typically ~2x.
 RECENT_LIKES_LIMIT = 100
 
-mcp = MCPServer("commendation")
+mcp = MCPServer("re-com")
 
 _yt: YTMusic | None = None
 _store_conn = None

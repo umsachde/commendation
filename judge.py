@@ -24,12 +24,12 @@ import moodspace
 
 # Default to the strongest model: which model labels your library is a decision
 # about quality, and it belongs to the user, not to this file. Override with
-# COMMENDATION_JUDGE_MODEL to trade accuracy for cost.
-MODEL = os.environ.get("COMMENDATION_JUDGE_MODEL", "claude-opus-5")
-EFFORT = os.environ.get("COMMENDATION_JUDGE_EFFORT", "low")
+# RECOM_JUDGE_MODEL to trade accuracy for cost.
+MODEL = os.environ.get("RECOM_JUDGE_MODEL", "claude-opus-5")
+EFFORT = os.environ.get("RECOM_JUDGE_EFFORT", "low")
 
 # Lyrics make these prompts long, so batches stay modest.
-BATCH_SIZE = int(os.environ.get("COMMENDATION_JUDGE_BATCH", 12))
+BATCH_SIZE = int(os.environ.get("RECOM_JUDGE_BATCH", 12))
 
 SYSTEM = """You place songs in a four-axis mood space. You are given each song's \
 title, artists, any mood-playlist tags YouTube Music has applied to it, and \

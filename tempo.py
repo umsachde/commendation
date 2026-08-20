@@ -31,7 +31,7 @@ from typing import Any, Iterable
 import store
 
 API = "https://api.deezer.com"
-USER_AGENT = "commendation/0.2 (+https://github.com/umsachde/commendation)"
+USER_AGENT = "re-com/0.2 (+https://github.com/umsachde/re-com)"
 
 # Deezer permits roughly 50 requests per 5 seconds. Stay well under it.
 THROTTLE = 0.12

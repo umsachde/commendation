@@ -1,5 +1,5 @@
 [project]
-name = "commendation"
+name = "re-com"
 version = "0.2.0"
 description = "MCP server that recommends new songs by mood, guaranteed to exclude anything already in your library (backend: YouTube Music)"
 readme = "README.md"
@@ -17,7 +17,7 @@ dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
 llm = ["anthropic>=0.40"]
 
 [project.urls]
-Homepage = "https://github.com/umsachde/commendation"
+Homepage = "https://github.com/umsachde/re-com"
 
 [build-system]
 requires = ["setuptools>=68"]

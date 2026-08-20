@@ -1,10 +1,10 @@
-# commendation
+# re-com
 
 An [MCP](https://modelcontextprotocol.io) server that recommends **new** songs — never a song already in your library, meaning never a song already in Liked Music *or in any of your playlists*, not just the one you seeded from.
 
 It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
 
-**Backend: YouTube Music (v1).** Commendation is designed as a general recommendation engine, not tied to one service — v1 is built entirely against YouTube Music (via `ytmusicapi`). Spotify support is planned as a second backend; see `PLAN.md`'s "v3 — Multi-provider support" section for the design questions around that.
+**Backend: YouTube Music (v1).** re-com is designed as a general recommendation engine, not tied to one service — v1 is built entirely against YouTube Music (via `ytmusicapi`). Spotify support is planned as a second backend; see `PLAN.md`'s "v3 — Multi-provider support" section for the design questions around that.
 
 ## Tools
 
@@ -130,17 +130,17 @@ Optionally, keep a real timeline of listening — `get_history()` reports only "
 local timestamps are the only clock this system will ever have:
 
 ```
-0 */3 * * * cd /path/to/commendation && .venv/bin/python scripts/snapshot_history.py
+0 */3 * * * cd /path/to/re-com && .venv/bin/python scripts/snapshot_history.py
 ```
 
 ### Configuration
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `COMMENDATION_DB_PATH` | `~/.commendation/store.db` | Mood index, labels, history, feedback. |
-| `COMMENDATION_JUDGE_MODEL` | `claude-opus-5` | Model for lyric-based labelling. |
-| `COMMENDATION_JUDGE_EFFORT` | `low` | Effort level for that labelling. |
-| `COMMENDATION_JUDGE_BATCH` | `12` | Songs per labelling request. |
+| `RECOM_DB_PATH` | `~/.recom/store.db` | Mood index, labels, history, feedback. |
+| `RECOM_JUDGE_MODEL` | `claude-opus-5` | Model for lyric-based labelling. |
+| `RECOM_JUDGE_EFFORT` | `low` | Effort level for that labelling. |
+| `RECOM_JUDGE_BATCH` | `12` | Songs per labelling request. |
 
 Everything mood-related is stored in local SQLite. The only thing that ever leaves the machine is,
 optionally, song titles and lyric excerpts sent to the Claude API for labelling.
@@ -242,8 +242,8 @@ exclusion set beats no recommendation, the same partial-results philosophy used 
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `COMMENDATION_CACHE_PATH` | `~/.commendation/library_cache.json` | Where the cached set lives (~22 KB). |
-| `COMMENDATION_CACHE_TTL` | `21600` (6 hours) | How long a cached set stays usable. **Set to `0` to disable caching** and rebuild on every call. |
+| `RECOM_CACHE_PATH` | `~/.recom/library_cache.json` | Where the cached set lives (~22 KB). |
+| `RECOM_CACHE_TTL` | `21600` (6 hours) | How long a cached set stays usable. **Set to `0` to disable caching** and rebuild on every call. |
 
 The cache is written atomically (temp file + rename), and a missing, unreadable, malformed or expired
 cache is treated as a miss rather than an error — worst case you pay the ~20s rebuild v1 always paid.
@@ -290,12 +290,12 @@ These headers expire/rotate periodically. If tools start failing with an auth er
 ### 3. Add to Claude Code
 
 ```bash
-claude mcp add commendation -s user \
-  -e COMMENDATION_AUTH_PATH="$(pwd)/headers_auth.json" \
+claude mcp add re-com -s user \
+  -e RECOM_AUTH_PATH="$(pwd)/headers_auth.json" \
   -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
 ```
 
-`-s user` makes it available in any Claude Code session, not just this directory. Use absolute paths for the python interpreter, `server.py`, and `COMMENDATION_AUTH_PATH` since the server can be launched from any working directory.
+`-s user` makes it available in any Claude Code session, not just this directory. Use absolute paths for the python interpreter, `server.py`, and `RECOM_AUTH_PATH` since the server can be launched from any working directory.
 
 For other MCP clients (Claude Desktop, etc.), point them at the same command and env var using their respective config format.
 

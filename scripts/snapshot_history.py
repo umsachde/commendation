@@ -22,7 +22,7 @@ from ytmusicapi import YTMusic  # noqa: E402
 
 
 def main() -> int:
-    auth = os.environ.get("COMMENDATION_AUTH_PATH", "headers_auth.json")
+    auth = os.environ.get("RECOM_AUTH_PATH", "headers_auth.json")
     if not Path(auth).exists():
         print(f"error: {auth} not found. Run scripts/setup_auth_from_file.py first.", file=sys.stderr)
         return 1

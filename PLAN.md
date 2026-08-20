@@ -1,14 +1,14 @@
-# Commendation — Design & Build Plan
+# re-com — Design & Build Plan
 
 > Reference doc for future Claude agents working on this project. Read this before writing any code here.
 > This file may reference `ytmusic-mcp` (a sibling project) for context on prior decisions — nothing else in this
-> repo (README, code, comments) should, since Commendation is meant to stand alone.
+> repo (README, code, comments) should, since re-com is meant to stand alone.
 
 ## Goal
 
-Recommend genuinely **new** songs based on a seed song or seed playlist — better than a streaming service's built-in radio/autoplay, which the user has found mediocre and which resurfaces songs already liked. Commendation improves on radio by combining multiple independent discovery signals instead of trusting one algorithm, and guarantees novelty by hard-filtering anything the user has already liked (or, for playlist seeds, anything already in that playlist).
+Recommend genuinely **new** songs based on a seed song or seed playlist — better than a streaming service's built-in radio/autoplay, which the user has found mediocre and which resurfaces songs already liked. re-com improves on radio by combining multiple independent discovery signals instead of trusting one algorithm, and guarantees novelty by hard-filtering anything the user has already liked (or, for playlist seeds, anything already in that playlist).
 
-Commendation is meant to be a **general song-recommendation engine, not tied to one streaming service.** v1 is built entirely against YouTube Music (via `ytmusicapi`) since that's the account/library available today, but nothing about the goal, ranking approach, or tool contract is YouTube-specific — v3 (see below) plans to add Spotify as a second backend.
+re-com is meant to be a **general song-recommendation engine, not tied to one streaming service.** v1 is built entirely against YouTube Music (via `ytmusicapi`) since that's the account/library available today, but nothing about the goal, ranking approach, or tool contract is YouTube-specific — v3 (see below) plans to add Spotify as a second backend.
 
 ## Hard requirements (non-negotiable)
 
@@ -27,8 +27,8 @@ Approach: treat radio as **one signal among several**, not the whole system, and
 
 ## Architecture decision
 
-- Standalone MCP server: **`commendation`**. Not a fork or extension of any other project — it has its own auth setup, its own scripts, its own README. (It happens to authenticate against the same YouTube account used elsewhere on this machine, but that's a user-level fact, not a code dependency — nothing in this repo imports or references another project.)
-- Auth: same `ytmusicapi` browser-header approach as any `ytmusicapi`-based project — see this repo's own README for the exact steps. Auth file path is configurable via the `COMMENDATION_AUTH_PATH` env var (default `headers_auth.json` in the project root), never hardcoded.
+- Standalone MCP server: **`re-com`**. Not a fork or extension of any other project — it has its own auth setup, its own scripts, its own README. (It happens to authenticate against the same YouTube account used elsewhere on this machine, but that's a user-level fact, not a code dependency — nothing in this repo imports or references another project.)
+- Auth: same `ytmusicapi` browser-header approach as any `ytmusicapi`-based project — see this repo's own README for the exact steps. Auth file path is configurable via the `RECOM_AUTH_PATH` env var (default `headers_auth.json` in the project root), never hardcoded.
 - **Read-only recommendation engine.** It does not create or modify playlists — it only returns ranked recommendations. Saving results into an actual YouTube Music playlist is a separate concern for whatever's orchestrating this tool (e.g. Claude calling a playlist-management MCP tool alongside this one).
 - Own `handle_errors` wrapper: auth-expired / rate-limit-429 / network-error → clean, actionable messages, no raw tracebacks.
 
@@ -112,7 +112,7 @@ Not started. Open design questions for whichever agent picks this up:
 - **Provider abstraction.** `_gather_seed_candidates`, `_liked_video_ids`, etc. are currently written directly against `ytmusicapi`. v3 needs some kind of provider interface (e.g. a `Provider` protocol with `get_seed_candidates`, `get_liked_ids`, `get_playlist_tracks` methods) so the scoring/ranking/exclusion logic in `_merge_and_score` / `_finalize` — which is already provider-agnostic — can run over either backend unchanged.
 - **Auth is a bigger difference than it looks.** YouTube Music auth here is a copy-pasted browser header (see README). Spotify uses real OAuth (client ID/secret, redirect URI, refresh token) via the Spotify Web API — a materially different setup flow, likely its own `scripts/setup_auth_spotify.py`.
 - **Signal parity isn't guaranteed.** Spotify's Web API has artist top-tracks and (historically) a recommendations/related-artists endpoint, but Spotify has been actively deprecating/restricting several discovery endpoints for newer app registrations — check current API access levels before assuming parity with the YouTube Music 3-signal design above.
-- **Tool contract question:** does `recommend_from_song`/`recommend_from_playlist` gain a `provider` argument, or does provider selection happen at the MCP-server-instance level (e.g. a separately configured `commendation-spotify` server)? Whichever it is, a single call should almost certainly stay within one provider — cross-provider merging (e.g. seeding from a YouTube Music playlist but recommending Spotify tracks) is out of scope unless a future agent has a concrete reason to want it.
+- **Tool contract question:** does `recommend_from_song`/`recommend_from_playlist` gain a `provider` argument, or does provider selection happen at the MCP-server-instance level (e.g. a separately configured `re-com-spotify` server)? Whichever it is, a single call should almost certainly stay within one provider — cross-provider merging (e.g. seeding from a YouTube Music playlist but recommending Spotify tracks) is out of scope unless a future agent has a concrete reason to want it.
 - **IDs are provider-specific.** `video_id` is currently baked into the tool signatures and output (`videoId` field) as YouTube Music terminology. This session deliberately left that rename undone (see git history/PLAN discussion around 2026-08-19) rather than doing it speculatively — but it's the first thing to revisit once a second provider actually exists, since Spotify track IDs/URIs aren't YouTube video IDs.
 
 ## v4 — Respect native YouTube Music dislikes
@@ -152,12 +152,12 @@ Music, the same way Liked Music is already a hard exclusion.
 - v2 items below are all still open.
 
 **Since the above was written:**
-- Git repo initialized, pushed to `github.com/umsachde/commendation` (`origin/main`).
-- Registered with Claude Code via `claude mcp add commendation -s user ...` — connected.
+- Git repo initialized, pushed to `github.com/umsachde/re-com` (`origin/main`).
+- Registered with Claude Code via `claude mcp add re-com -s user ...` — connected.
 - Added a real unit test suite (`tests/test_server.py`, 34 tests) against a fake YTMusic client — covers `_norm_track`, `_merge_and_score`, `_finalize`, `_gather_seed_candidates` (including the isinstance-guard regression and the related-artist expansion cap), `_liked_video_ids`, `handle_errors`, and both tools end-to-end. No network/auth needed; run with `pytest`.
 - Found and fixed a real bug this way: `handle_errors` caught `YTMusicServerError` before `YTMusicGatedError`, and since the latter subclasses the former, the gated-content branch was dead code — gated errors always fell through to the generic "server error" message instead of the clearer gated-specific one. Reordered the `except` clauses (subclass before superclass) to fix.
 
-**Aside (does not affect commendation, but happened during this build):** a `remove_from_playlist` tool was added to the separate `ytmusic-mcp` project to clean up a duplicate-track bug found in a "C - Country" playlist while smoke-testing `recommend_from_playlist` against real data. That's `ytmusic-mcp` maintenance, unrelated to commendation's own scope — mentioned here only so a future agent doesn't wonder why an unrelated commit landed mid-build.
+**Aside (does not affect re-com, but happened during this build):** a `remove_from_playlist` tool was added to the separate `ytmusic-mcp` project to clean up a duplicate-track bug found in a "C - Country" playlist while smoke-testing `recommend_from_playlist` against real data. That's `ytmusic-mcp` maintenance, unrelated to re-com's own scope — mentioned here only so a future agent doesn't wonder why an unrelated commit landed mid-build.
 
 **2026-08-19 session — three follow-up features/fixes driven directly by user feedback, each committed separately:**
 - Added `songs_by_artist` — see its writeup under Tools (v1) above. New helpers: `_library_video_ids`, `_resolve_artist`, `_artist_song_catalog`.
@@ -170,8 +170,8 @@ Music, the same way Liked Music is already a hard exclusion.
 **2026-08-19 (later session) — v2 Phase 0, first slice: library exclusion cache.**
 - Every tool call rebuilt the exclusion set from scratch: Liked Music (~1,100 tracks, 7.4s) plus all 28
   playlists (~1,550 tracks, 12.0s). Measured at **20.5s of pure overhead per call.**
-- Now cached to `~/.commendation/library_cache.json` (~22 KB), TTL 6h, both configurable via
-  `COMMENDATION_CACHE_PATH` / `COMMENDATION_CACHE_TTL` (`0` disables caching).
+- Now cached to `~/.recom/library_cache.json` (~22 KB), TTL 6h, both configurable via
+  `RECOM_CACHE_PATH` / `RECOM_CACHE_TTL` (`0` disables caching).
 - **The novelty guarantee is preserved for likes, not just deferred.** A cache hit re-fetches only the
   most recent page of Liked Music (`limit=100`, ~1.3s) and unions it in — measured because newly liked
   songs land at the top of `LM`, so a bounded fetch catches them. The residual gap is a song added to a

@@ -1,4 +1,4 @@
-# Commendation v2 — Mood-Aware Recommendation
+# re-com v2 — Mood-Aware Recommendation
 
 > Design doc for v2. Read alongside `PLAN.md` (v1 design + v3 multi-provider notes).
 > Every number in "Measured ground truth" below was probed against the real account on 2026-08-19,
@@ -325,7 +325,7 @@ v1 is a single ~500-line `server.py` with no persistence. v2 needs real structur
 the same restructuring `PLAN.md`'s v3 multi-provider work needs, so do it once, properly.
 
 ```
-commendation/
+recom/
   server.py            # thin MCP tool layer only
   provider/
     base.py            # Protocol — the v3 seam, defined now
@@ -346,7 +346,7 @@ scripts/
   snapshot_history.py  # timestamps history; cron every few hours
 ```
 
-### Storage — SQLite at `~/.commendation/store.db`
+### Storage — SQLite at `~/.recom/store.db`
 
 | Table | Holds |
 | --- | --- |
@@ -481,13 +481,13 @@ Re-measure with `python scripts/label_library.py --report` once the crawl finish
 
 ### Deviations from the plan above
 
-- **Flat modules, not a `commendation/` package.** The repo was already flat (`server.py` at the root);
+- **Flat modules, not a `recom/` package.** The repo was already flat (`server.py` at the root);
   mixing layouts mid-build would have been worse than either choice. Revisit alongside the v3 provider
   work, which needs the same restructuring.
 - **The v1 library cache stayed a JSON file** rather than folding into `library_snapshot`. It works and is
   tested; rewriting it purely for storage uniformity wasn't worth the churn.
 - **`claude-opus-5` is the default judge model, not Haiku.** Which model reads your library is a quality
-  decision that belongs to the user; `COMMENDATION_JUDGE_MODEL` exists for anyone who wants to trade
+  decision that belongs to the user; `RECOM_JUDGE_MODEL` exists for anyone who wants to trade
   accuracy for cost.
 - **Genre is a ranking input, not a mood source.** Genre says nothing about mood on its own, so it filters
   seeds and boosts known artists rather than pretending to place a song in the space.
