@@ -2,10 +2,13 @@
 
 Combines multiple independent discovery signals (radio, related content,
 artist catalog expansion) instead of trusting a single algorithm, and always
-excludes anything already in the user's library. v1 is backed by YouTube
-Music, reached entirely through the sibling `ytmusic-mcp` server (see
-ytmusic_client.py) -- re-com holds no YouTube Music credentials of its own.
-See PLAN.md for planned multi-provider support.
+excludes anything already in the user's library. Backed by YouTube Music or
+Spotify, chosen at process start by RECOM_PROVIDER ("youtube", the default,
+or "spotify") and reached entirely through a sibling `*-mcp` server
+(ytmusic-mcp / spotify-mcp -- see ytmusic_client.py / spotify_client.py) --
+re-com holds no streaming-service credentials of its own for either backend.
+See provider.py for the shared interface both backends implement, and
+PLAN.md for the v3 multi-provider design notes.
 """
 
 import functools
@@ -18,7 +21,8 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from ytmusic_client import YTMusicClient, YTMusicMCPError
+from provider import ProviderError
+from ytmusic_client import YTMusicClient
 
 # Rebuilding the library exclusion set costs ~20s of API calls (Liked Music
 # plus every playlist), and every tool needs it. It's cached on disk instead;
@@ -31,9 +35,15 @@ CACHE_TTL = int(os.environ.get("RECOM_CACHE_TTL", 6 * 60 * 60))
 # ytmusic-mcp/ytmusicapi pages this, so the real count returned is typically ~2x.
 RECENT_LIKES_LIMIT = 100
 
-mcp = MCPServer("re-com")
+# Which backend this server instance talks to. Each provider is a separate
+# MCP server instance/registration (e.g. "re-com" for YouTube Music,
+# "re-com-spotify" for Spotify) rather than a per-call argument -- a single
+# call should stay within one provider, and this keeps that true structurally.
+PROVIDER = os.environ.get("RECOM_PROVIDER", "youtube").lower()
 
-_yt: YTMusicClient | None = None
+mcp = MCPServer("re-com" if PROVIDER == "youtube" else f"re-com-{PROVIDER}")
+
+_yt: Any = None
 _store_conn = None
 
 
@@ -47,31 +57,45 @@ def _store():
     return _store_conn
 
 
-def _client() -> YTMusicClient:
-    """The (persistent, lazily-started) connection to ytmusic-mcp.
+def _client() -> Any:
+    """The (persistent, lazily-started) connection to this instance's
+    provider's sibling *-mcp server (ytmusic-mcp or spotify-mcp), selected by
+    RECOM_PROVIDER ("youtube", the default, or "spotify").
 
-    re-com never holds YouTube Music credentials -- ytmusic-mcp owns auth
-    entirely; see ytmusic_client.py.
+    re-com never holds streaming-service credentials itself -- the sibling
+    *-mcp server owns auth entirely; see ytmusic_client.py / spotify_client.py.
+    Both implement the same provider.Provider shape, so nothing past this
+    function needs to know which backend it's talking to.
     """
     global _yt
     if _yt is None:
-        _yt = YTMusicClient()
+        if PROVIDER == "spotify":
+            from spotify_client import SpotifyClient
+
+            _yt = SpotifyClient()
+        elif PROVIDER == "youtube":
+            _yt = YTMusicClient()
+        else:
+            raise RuntimeError(
+                f"Unknown RECOM_PROVIDER {PROVIDER!r}. Expected 'youtube' or 'spotify'."
+            )
     return _yt
 
 
 def handle_errors(fn):
-    """Translate ytmusic-mcp/argument-validation failures into clean tool errors.
+    """Translate provider/argument-validation failures into clean tool errors.
 
-    ytmusic-mcp already turns auth/rate-limit/gated/network failures into
-    clear, actionable messages (YTMusicMCPError) -- this just keeps those from
-    arriving as raw tracebacks, and does the same for our own validation.
+    Every provider's sibling *-mcp server already turns auth/rate-limit/gated/
+    network failures into clear, actionable messages (a ProviderError
+    subclass) -- this just keeps those from arriving as raw tracebacks, and
+    does the same for our own validation.
     """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except YTMusicMCPError as e:
+        except ProviderError as e:
             raise RuntimeError(str(e)) from e
         except ValueError as e:
             # Our own argument validation (e.g. an unknown arc name). These are

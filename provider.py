@@ -1,0 +1,60 @@
+"""The backend-agnostic seam between re-com's ranking/mood logic and whichever
+streaming service it's actually talking to.
+
+`signals.py`'s candidate generation (`_gather_seed_candidates`) and most of
+`server.py` were written against `ytmusicapi.YTMusic`'s exact method
+signatures and return shapes, because v1 only had one backend. `Provider`
+formalizes that shape as an explicit interface -- not a new one, since the
+proven candidate-generation logic (and its whole test suite) shouldn't be
+rewritten just to add a second backend.
+
+A new provider (Spotify, ...) implements this same interface by translating
+its own API into these shapes -- see `spotify_client.py` for the concrete
+example: `get_watch_playlist`/`get_song_related`/`get_artist` don't exist on
+Spotify's Web API, so `SpotifyClient` builds equivalent responses out of
+Spotify's recommendations/related-artists/artist-top-tracks endpoints. This
+is the "shape spotify-mcp's tools to fit `_gather_seed_candidates`'s
+expectations" option from PLAN.md's v3 notes, chosen over growing a new
+backend-agnostic candidate-generation contract because it keeps every
+existing signal/ranking/mood code path -- and every test covering it --
+completely unchanged.
+"""
+
+from typing import Any, Protocol, runtime_checkable
+
+
+class ProviderError(RuntimeError):
+    """Base class for a provider-specific failure that's already a clean,
+    actionable message (auth/rate-limit/gated/network) -- never a raw
+    traceback. Every provider's error type subclasses this so signal-failure
+    handling (`signals._SIGNAL_ERRORS`) and `server.handle_errors` work the
+    same regardless of which backend raised it."""
+
+
+@runtime_checkable
+class Provider(Protocol):
+    """The subset of a backend's surface the rest of re-com relies on.
+
+    Matches `ytmusicapi.YTMusic`'s shape (the reference implementation,
+    `YTMusicClient`) since that's the shape `signals.py` and `server.py`
+    already assume. `videoId` in every returned track dict is this
+    interface's track-identity field name for any backend, not literally a
+    YouTube video id -- see `spotify_client.py` for why that field is kept
+    rather than renamed.
+    """
+
+    def search(self, query: str, filter: str | None = None, limit: int = 20) -> list[dict[str, Any]]: ...
+
+    def get_library_playlists(self, limit: int | None = 25) -> list[dict[str, Any]]: ...
+
+    def get_playlist(self, playlist_id: str, limit: int | None = 100) -> dict[str, Any]: ...
+
+    def get_watch_playlist(
+        self, videoId: str | None = None, limit: int = 25, radio: bool = False
+    ) -> dict[str, Any]: ...
+
+    def get_song_related(self, browseId: str) -> list[dict[str, Any]]: ...
+
+    def get_artist(self, channelId: str) -> dict[str, Any]: ...
+
+    def get_history(self) -> list[dict[str, Any]]: ...

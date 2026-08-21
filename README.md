@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that recommends **new** songs �
 
 It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
 
-**Backend: YouTube Music (v1).** re-com is designed as a general recommendation engine, not tied to one service. v1 is built against YouTube Music, but re-com itself holds **no YouTube Music credentials of any kind** — every call to YouTube Music goes through the sibling [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) server, which re-com spawns as an MCP subprocess and which owns auth entirely (see [Setup](#2-connect-to-ytmusic-mcp) below). Spotify support is planned as a second backend, following the same shape — a `spotify-mcp` server owning Spotify auth, with re-com talking to it the same way; see `PLAN.md`'s "v3 — Multi-provider support" section for the open design questions.
+**Backends: YouTube Music and Spotify.** re-com is a general recommendation engine, not tied to one service — re-com itself holds **no streaming-service credentials of any kind** for either backend. Every call goes through a sibling `*-mcp` server that re-com spawns as an MCP subprocess and that owns auth entirely: [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) for YouTube Music, [`spotify-mcp`](https://github.com/umsachde/spotify-mcp) for Spotify. Which one a given re-com instance talks to is set once, at process start, via `RECOM_PROVIDER` — see [Setup](#2-connect-to-a-backend) below. Both are registered as separate MCP server instances (e.g. `re-com` and `re-com-spotify`); a single tool call always stays within one provider. See `provider.py` and `PLAN.md`'s "v3 — Multi-provider support" section for the design.
 
 ## Tools
 
@@ -320,12 +320,14 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 2. Connect to ytmusic-mcp
+### 2. Connect to a backend
 
-re-com holds no YouTube Music credentials of its own — every call to YouTube Music goes through the sibling [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) server, which re-com spawns as a subprocess over MCP and which owns login entirely.
+re-com holds no streaming-service credentials of its own for either backend — every call goes through a sibling `*-mcp` server that re-com spawns as a subprocess over MCP and that owns login entirely. Pick one (or set up both as two separate registrations):
 
-1. Set up `ytmusic-mcp` and authenticate it (see that project's own README) — this is the *only* place YouTube Music credentials live.
-2. Point re-com at it via two env vars: `RECOM_YTMUSIC_MCP_COMMAND` (its interpreter) and `RECOM_YTMUSIC_MCP_ARGS` (its `server.py` path).
+#### YouTube Music (`ytmusic-mcp`)
+
+1. Set up [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) and authenticate it (see that project's own README) — this is the *only* place YouTube Music credentials live.
+2. Point re-com at it via `RECOM_YTMUSIC_MCP_COMMAND` (its interpreter) and `RECOM_YTMUSIC_MCP_ARGS` (its `server.py` path). `RECOM_PROVIDER=youtube` is the default, so it doesn't need to be set explicitly.
 
 ```bash
 claude mcp add re-com -s user \
@@ -334,17 +336,34 @@ claude mcp add re-com -s user \
   -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
 ```
 
-`-s user` makes it available in any Claude Code session, not just this directory. Use absolute paths throughout, since the server can be launched from any working directory.
+#### Spotify (`spotify-mcp`)
+
+1. Set up [`spotify-mcp`](https://github.com/umsachde/spotify-mcp) and authenticate it (see that project's own README) — this is the *only* place Spotify credentials live.
+2. Register a **second, separate** re-com instance with `RECOM_PROVIDER=spotify` and `RECOM_SPOTIFY_MCP_COMMAND` / `RECOM_SPOTIFY_MCP_ARGS` pointing at it:
+
+```bash
+claude mcp add re-com-spotify -s user \
+  -e RECOM_PROVIDER=spotify \
+  -e RECOM_SPOTIFY_MCP_COMMAND="/path/to/spotify-mcp/.venv/bin/python" \
+  -e RECOM_SPOTIFY_MCP_ARGS="/path/to/spotify-mcp/server.py" \
+  -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
+```
+
+**What's different from YouTube Music, in practice:** Spotify's Web API has no radio/related-content feed the way YouTube Music does, and Spotify restricts its `/recommendations` and related-artists endpoints for API apps created after November 2024 without Extended Quota Mode. `spotify_client.py` builds the same radio/related/artist-expansion shape out of what Spotify does expose (seed-track recommendations where available, related-artists' top tracks, the seed artist's own top tracks — capped at ~10 by Spotify, thinner than YouTube Music's full catalog playlist); if your app lacks access to a restricted endpoint, that one signal is skipped gracefully rather than failing the recommendation. `recommend_for_mood` and the rest of the v2 mood engine are **YouTube-only for now** — they depend on YouTube's mood-playlist atlas (`atlas.py`, `scripts/build_atlas.py`), which has no Spotify equivalent yet; `recommend_from_song`, `recommend_from_playlist`, `songs_by_artist`, and `refresh_library` work on both backends.
+
+---
+
+`-s user` makes either registration available in any Claude Code session, not just this directory. Use absolute paths throughout, since the server can be launched from any working directory.
 
 For other MCP clients (Claude Desktop, etc.), point them at the same command and env vars using their respective config format.
 
-If `ytmusic-mcp`'s auth expires or rotates, tool calls fail with a clear message pointing at re-authenticating *there* — re-com has nothing of its own to re-run.
+If a backend's `*-mcp` auth expires or rotates, tool calls fail with a clear message pointing at re-authenticating *there* — re-com has nothing of its own to re-run.
 
 **Offline maintenance scripts still authenticate directly.** `scripts/build_atlas.py`, `scripts/label_library.py`, `scripts/build_genres.py`, `scripts/build_tempo.py`, `scripts/snapshot_history.py`, and `scripts/quality_check.py` are indexing/labelling jobs you run yourself from the command line, not part of the live tool-call path — they still use `ytmusicapi` directly and need their own `headers_auth.json` (see `scripts/setup_auth_from_file.py` / `scripts/setup_auth.py`, and `RECOM_AUTH_PATH`). That's a separate, unrelated credential from `ytmusic-mcp`'s.
 
 ## Testing
 
-Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, library-cache behaviour (hits, misses, expiry, corruption, top-up, write failures), artist/song search resolution, error translation, and every tool end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake client matching `ytmusic_client.YTMusicClient`'s surface. No network access, `ytmusic-mcp`, or any YouTube Music credential required. A `conftest.py` fixture redirects the library cache to a temp path for every test, so runs never touch your real cache.
+Unit tests (`tests/`) cover the pure logic — normalization, scoring, ranking, exclusion filtering, library-cache behaviour (hits, misses, expiry, corruption, top-up, write failures), artist/song search resolution, error translation, and every tool end-to-end (happy path, signal failures, shortfalls, validation errors) — against a hand-rolled fake client matching `ytmusic_client.YTMusicClient`'s surface. `tests/test_spotify_client.py` and `tests/test_provider.py` cover `spotify_client.py`'s shape-translation logic (search/playlist/watch-playlist/related/artist/history normalization, graceful degradation when a restricted endpoint fails) and `RECOM_PROVIDER` backend selection the same way, against a fake `_call`. No network access, either `*-mcp` server, or any streaming-service credential required. A `conftest.py` fixture redirects the library cache to a temp path for every test, so runs never touch your real cache.
 
 ```bash
 pip install -e ".[dev]"
@@ -357,7 +376,7 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-288 tests, 93% line coverage across the whole project. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end. What remains uncovered is `_client()`'s real `YTMusicClient()` construction (which actually spawns `ytmusic-mcp`) and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live `ytmusic-mcp` connection.
+318 tests across the whole project. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end (YouTube-only, per the mood engine's atlas dependency noted above). What remains uncovered is `_client()`'s real `YTMusicClient()`/`SpotifyClient()` construction (which actually spawns the sibling `*-mcp` subprocess) and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live connection.
 
 `conftest.py` redirects both the library cache and the SQLite store to temp paths for every test, so runs never touch your real data.
 
@@ -372,6 +391,8 @@ For each seed song, candidates are pulled from three independent signals:
 3. **Artist expansion** — the seed artist's own other songs, plus top songs from a couple of their related artists.
 
 A candidate's score is how many distinct (seed, signal) combinations surfaced it — the more independent signals agree, the higher it ranks. Every result includes a `sources` field showing which signals surfaced it, so recommendations are explainable rather than a black box.
+
+**On Spotify**, the same three `sources` labels (`radio`/`related`/`artist`) are built from Spotify's own endpoints instead: `radio` from seed-track `/recommendations`, `related` from the seed artist's related artists' top tracks, and `artist` from the seed artist's own top tracks (plus a couple of related artists', same as YouTube Music). See `spotify_client.py` for the mapping and its limitations (no full-catalog endpoint, and `/recommendations`/related-artists may be 403'd for newer Spotify API apps).
 
 Liked Music and every playlist in your library are excluded last, always, as a hard filter — no recommendation can ever be a song you've already liked or already saved anywhere.
 

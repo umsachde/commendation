@@ -13,16 +13,18 @@ in any one algorithm.
 
 from typing import Any
 
-from ytmusic_client import YTMusicMCPError
+from provider import ProviderError
 
 _SOURCE_RADIO = "radio"
 _SOURCE_RELATED = "related"
 _SOURCE_ARTIST = "artist"
 _RELATED_ARTISTS_TO_EXPAND = 2  # how many of the seed artist's related artists to also pull top songs from
 
-# ytmusic-mcp already translates auth/rate-limit/gated/network failures into
-# this one clear exception type, so a failed signal for one seed is just this.
-_SIGNAL_ERRORS = (YTMusicMCPError,)
+# Every provider (ytmusic-mcp, spotify-mcp, ...) already translates its own
+# auth/rate-limit/gated/network failures into a ProviderError subclass with a
+# clear, actionable message, so a failed signal for one seed is just this --
+# regardless of which backend raised it.
+_SIGNAL_ERRORS = (ProviderError,)
 
 
 def _norm_track(item: dict[str, Any]) -> dict[str, Any]:

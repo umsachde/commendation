@@ -27,6 +27,8 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from provider import ProviderError
+
 _CONNECT_TIMEOUT = 30
 _CALL_TIMEOUT = 60
 
@@ -37,7 +39,7 @@ CONFIG_HELP = (
 )
 
 
-class YTMusicMCPError(RuntimeError):
+class YTMusicMCPError(ProviderError):
     """A call to ytmusic-mcp failed; the message is already clear and actionable
     (ytmusic-mcp translates auth/rate-limit/gated/network failures itself)."""
 
